@@ -19,17 +19,23 @@ log() { printf '[box-app] %s\n' "$1"; }
 
 # Production dependencies are shared by releases with the same lockfile.
 DEPS_DIR="${APP_ROOT}/deps/${LOCK_HASH}"
-if [ ! -d "${DEPS_DIR}/node_modules" ]; then
+if [ ! -f "${DEPS_DIR}/.installed" ]; then
   log "installing dependencies ${LOCK_HASH}"
   rm -rf "$DEPS_DIR" && mkdir -p "$DEPS_DIR"
   if [ "$DEPS_URL" = - ]; then
     # Installed here so native packages match this box's CPU and libc. Only
     # dependencies' install scripts run, not the app's own lifecycle scripts.
     cp "${RELEASE_DIR}/package.json" "${RELEASE_DIR}/package-lock.json" "$DEPS_DIR/"
-    (cd "$DEPS_DIR" && HOME=/tmp npm ci --omit=dev --ignore-scripts --no-audit --no-fund && HOME=/tmp npm rebuild)
+    # SSM children inherit its OOM protection. Let the kernel kill an installer
+    # before it kills the running app, HTTPS proxy or system services.
+    (echo 500 > /proc/self/oom_score_adj
+      cd "$DEPS_DIR"
+      HOME=/tmp npm ci --omit=dev --ignore-scripts --no-audit --no-fund
+      HOME=/tmp npm rebuild)
   else
     curl -fsSL "$DEPS_URL" | tar -xz -C "$DEPS_DIR"
   fi
+  touch "${DEPS_DIR}/.installed"
 fi
 rm -rf "${RELEASE_DIR}/node_modules"
 ln -s "${DEPS_DIR}/node_modules" "${RELEASE_DIR}/node_modules"

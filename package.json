@@ -1,6 +1,6 @@
 {
   "name": "@majapisoftwares/ci",
-  "version": "2.4.4",
+  "version": "2.4.5",
   "description": "Reusable Majapi CI/CD workflow and the app-type detection it shares with Majapi Cloud",
   "license": "MIT",
   "type": "module",
