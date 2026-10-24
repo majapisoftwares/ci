@@ -17,8 +17,8 @@ const COMPILED_PATTERNS = [
 ];
 
 const FAST_PATTERNS = [
-  /^(app|components|lib|public|src)//,
-  /^(docs|tests?|__tests__)//,
+  /^(app|components|lib|public|src)\//,
+  /^(docs|tests?|__tests__)\//,
   /\.(css|md|mdx|test\.[cm]?[jt]sx?|spec\.[cm]?[jt]sx?)$/,
 ];
 
