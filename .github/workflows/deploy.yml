@@ -186,7 +186,7 @@ jobs:
   # the classifier marks as full (infra, Dockerfile, ...) run `pulumi up`.
   # Previews: a shared preview box hosts every PR. Fast previews ship source,
   # compiled previews ship a build, full previews get their own Pulumi stack.
-  # The box stops when no open PR needs it and starts again on the next deploy.
+  # The preview-shared stack is destroyed when no open PR needs it and provisioned again on the next preview.
 
   container_build:
     needs: detect
@@ -792,52 +792,12 @@ jobs:
         env:
           PULUMI_CONFIG_PASSPHRASE: ${{ secrets.PULUMI_CONFIG_PASSPHRASE }}
 
-  container_destroy_shared:
+  # Destroys the whole preview-shared stack (box, disk, IP, DNS, cache) once no
+  # open, non-draft PR needs it: after a PR closes, daily, or on a "shared"
+  # cleanup dispatch. The next preview provisions it again with `pulumi up`.
+  container_destroy_idle_shared:
     needs: [detect, container_cleanup]
-    if: always() && needs.detect.outputs.container == 'true' && github.event_name == 'workflow_dispatch' && inputs.cleanup_preview_pr == 'shared'
-    runs-on: ubuntu-latest
-    concurrency:
-      group: pulumi-preview-shared
-      cancel-in-progress: false
-    environment:
-      name: preview-pr-shared
-    steps:
-      - uses: actions/checkout@v4
-      - id: open
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: echo "count=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --json isCrossRepository --jq '[.[] | select(.isCrossRepository | not)] | length')" >> "$GITHUB_OUTPUT"
-      - id: cfg
-        run: |
-          echo "work_dir=$(node -p 'require("./.majapi/ci.json").container.pulumi?.workDir || "infra/pulumi"')" >> "$GITHUB_OUTPUT"
-      - if: steps.open.outputs.count == '0'
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: ${{ steps.cfg.outputs.work_dir }}/package-lock.json
-      - if: steps.open.outputs.count == '0'
-        run: npm ci
-        working-directory: ${{ steps.cfg.outputs.work_dir }}
-      - if: steps.open.outputs.count == '0'
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN || vars.AWS_DEPLOY_ROLE_ARN }}
-          aws-region: ${{ vars.AWS_REGION || 'sa-east-1' }}
-      - if: steps.open.outputs.count == '0'
-        uses: pulumi/actions@v7
-        with:
-          cloud-url: s3://${{ vars.PULUMI_STATE_BUCKET }}
-          command: destroy
-          remove: true
-          stack-name: preview-shared
-          work-dir: ${{ steps.cfg.outputs.work_dir }}
-        env:
-          PULUMI_CONFIG_PASSPHRASE: ${{ secrets.PULUMI_CONFIG_PASSPHRASE }}
-
-  container_stop_idle_preview_box:
-    needs: [detect, container_cleanup]
-    if: always() && needs.detect.outputs.container == 'true' && (github.event_name == 'schedule' || needs.detect.outputs.cleanup == 'true')
+    if: always() && needs.detect.outputs.container == 'true' && (github.event_name == 'schedule' || needs.detect.outputs.cleanup == 'true' || (github.event_name == 'workflow_dispatch' && inputs.cleanup_preview_pr == 'shared'))
     runs-on: ubuntu-latest
     concurrency:
       group: pulumi-preview-shared
@@ -851,16 +811,47 @@ jobs:
           repository: majapisoftwares/ci
           ref: ${{ inputs.ci_ref }}
           path: .majapi-ci
-      - id: cfg
+      - id: idle
         env:
-          VARS_JSON: ${{ toJson(vars) }}
-          CTX_PR_NUMBER: "0"
-          CTX_ENVIRONMENT: preview-shared
-        run: node .majapi-ci/scripts/container/config.mjs values preview
-      - uses: aws-actions/configure-aws-credentials@v4
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          OPEN="$(gh api "repos/${GITHUB_REPOSITORY}/pulls?state=open&per_page=100" --paginate \
+            --jq "[.[] | select(.draft == false and .head.repo.full_name == \"${GITHUB_REPOSITORY}\")] | length" \
+            | awk '{ total += $1 } END { print total + 0 }')"
+          echo "${OPEN} open PR(s) need previews."
+          {
+            echo "idle=$([ "$OPEN" -eq 0 ] && echo true || echo false)"
+            echo "work_dir=$(node -p 'require("./.majapi/ci.json").container.pulumi?.workDir || "infra/pulumi"')"
+            echo "project=$(node -p 'require("./.majapi/ci.json").container.pulumi?.project || ""')"
+          } >> "$GITHUB_OUTPUT"
+      - if: steps.idle.outputs.idle == 'true'
+        uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN || vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION || 'sa-east-1' }}
-      - env:
-          GH_TOKEN: ${{ github.token }}
-        run: sh .majapi-ci/scripts/container/box.sh stop-if-idle "${{ steps.cfg.outputs.box }}"
+      - id: stack
+        if: steps.idle.outputs.idle == 'true'
+        run: echo "exists=$(sh .majapi-ci/scripts/container/pulumi-state.sh exists "${{ vars.PULUMI_STATE_BUCKET }}" preview-shared)" >> "$GITHUB_OUTPUT"
+      - if: steps.stack.outputs.exists == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: ${{ steps.idle.outputs.work_dir }}/package-lock.json
+      - if: steps.stack.outputs.exists == 'true'
+        run: npm ci
+        working-directory: ${{ steps.idle.outputs.work_dir }}
+      - if: steps.stack.outputs.exists == 'true'
+        run: sh .majapi-ci/scripts/container/pulumi-state.sh clear-lock "${{ vars.PULUMI_STATE_BUCKET }}" "${{ steps.idle.outputs.project }}" preview-shared
+      - if: steps.stack.outputs.exists == 'true'
+        uses: pulumi/actions@v7
+        with:
+          cloud-url: s3://${{ vars.PULUMI_STATE_BUCKET }}
+          command: destroy
+          comment-on-summary: true
+          remove: true
+          stack-name: preview-shared
+          work-dir: ${{ steps.idle.outputs.work_dir }}
+        env:
+          PULUMI_CONFIG_PASSPHRASE: ${{ secrets.PULUMI_CONFIG_PASSPHRASE }}

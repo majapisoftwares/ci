@@ -73,9 +73,9 @@ Containers deploy to EC2 boxes over SSM, with Pulumi for infrastructure. Without
 | --- | --- |
 | Push to the default branch | The classifier picks a **compiled release** (build, upload, run the app's deploy script on the production box) or, for infra changes, **`pulumi up`** on the `production` stack. |
 | PR opened/updated | The shared preview box is started (and provisioned via the `preview-shared` stack if missing). A **compiled preview** always deploys; a **fast preview** (source only) deploys when the classifier allows it; a **full preview** stack (`pr-<n>`) when it requires it. One PR comment shows the latest link. |
-| PR closed | The `pr-<n>` stack is destroyed, the app's removal script runs on the box, and the box **stops** if no open PR needs it. |
-| Daily schedule | Full preview stacks of PRs idle for a day are destroyed; the box stops when idle. |
-| `workflow_dispatch` | `deploy_production` forces `pulumi up`; `cleanup_preview_pr` removes one PR's preview, or `shared` destroys the shared preview stack when no PR is open. |
+| PR closed | The `pr-<n>` stack is destroyed and the app's removal script runs on the box. When no open PR needs previews, the whole `preview-shared` stack (box, disk, IP, DNS, build cache) is **destroyed**; the next preview provisions it again. |
+| Daily schedule | Full preview stacks of PRs idle for a day are destroyed, and `preview-shared` too when no PR needs it. |
+| `workflow_dispatch` | `deploy_production` forces `pulumi up`; `cleanup_preview_pr` removes one PR's preview, or `shared` destroys `preview-shared` when no PR needs it. |
 
 The app keeps what is specific to it: its Pulumi project, the scripts that run on its boxes, and this block:
 

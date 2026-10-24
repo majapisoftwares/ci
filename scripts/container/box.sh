@@ -2,8 +2,6 @@
 # Power and lookup for a box (EC2 instance tagged Name=<name>).
 #   sh box.sh id <name>            running instance id, or "None"
 #   sh box.sh start <name>         start if stopped; wait for SSM
-#   sh box.sh stop-if-idle <name>  stop when no open, non-draft same-repo PR remains
-# stop-if-idle needs GH_TOKEN and GITHUB_REPOSITORY.
 set -eu
 
 ACTION="$1"
@@ -58,23 +56,8 @@ case "$ACTION" in
     echo "${NAME} did not come online in SSM." >&2
     exit 1
     ;;
-  stop-if-idle)
-    if [ "$STATE" != running ] && [ "$STATE" != pending ]; then
-      echo "${NAME} is already ${STATE}."
-      exit 0
-    fi
-    OPEN="$(gh api "repos/${GITHUB_REPOSITORY}/pulls?state=open&per_page=100" --paginate \
-      --jq "[.[] | select(.draft == false and .head.repo.full_name == \"${GITHUB_REPOSITORY}\")] | length" \
-      | awk '{ total += $1 } END { print total + 0 }')"
-    if [ "$OPEN" -gt 0 ]; then
-      echo "${OPEN} open PR(s) still use previews; keeping ${NAME} running."
-      exit 0
-    fi
-    echo "No open PRs need previews; stopping ${NAME} (${INSTANCE_ID})."
-    aws ec2 stop-instances --instance-ids "$INSTANCE_ID" >/dev/null
-    ;;
   *)
-    echo "Usage: box.sh id|start|stop-if-idle <name>" >&2
+    echo "Usage: box.sh id|start <name>" >&2
     exit 2
     ;;
 esac
