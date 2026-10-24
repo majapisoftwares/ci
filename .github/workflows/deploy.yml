@@ -372,7 +372,8 @@ jobs:
           SHIP_DEPENDENCIES: ${{ steps.cfg.outputs.shipDependencies || 'true' }}
         run: echo "url=$(sh .majapi-ci/scripts/container/publish-release.sh | tail -n 1)" >> "$GITHUB_OUTPUT"
       - name: Verify production
-        run: curl -kfsSL "${{ steps.deploy.outputs.url }}${{ steps.cfg.outputs.healthPath }}" >/dev/null
+        # New boxes obtain their first HTTPS certificate after Caddy starts.
+        run: curl -fsSL --retry 18 --retry-all-errors --retry-delay 5 --max-time 15 "${{ steps.deploy.outputs.url }}${{ steps.cfg.outputs.healthPath }}" >/dev/null
 
   container_preview_shared:
     needs: detect
