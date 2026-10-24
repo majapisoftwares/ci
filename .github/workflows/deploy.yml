@@ -370,7 +370,11 @@ jobs:
           CPU: ${{ steps.cfg.outputs.cpu }}
           MEMORY: ${{ steps.cfg.outputs.memory }}
           SHIP_DEPENDENCIES: ${{ steps.cfg.outputs.shipDependencies || 'true' }}
-        run: echo "url=$(sh .majapi-ci/scripts/container/publish-release.sh | tail -n 1)" >> "$GITHUB_OUTPUT"
+        run: |
+          set -euo pipefail
+          url=$(sh .majapi-ci/scripts/container/publish-release.sh | tail -n 1)
+          test -n "$url"
+          echo "url=$url" >> "$GITHUB_OUTPUT"
       - name: Verify production
         # New boxes obtain their first HTTPS certificate after Caddy starts.
         run: curl -fsSL --retry 18 --retry-all-errors --retry-delay 5 --max-time 15 "${{ steps.deploy.outputs.url }}${{ steps.cfg.outputs.healthPath }}" >/dev/null
