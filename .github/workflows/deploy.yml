@@ -1,0 +1,259 @@
+# Majapi reusable CI/CD: detects the app type, then runs the static (S3 + CloudFront)
+# or container path. Repos with nothing to deploy skip every deploy job.
+name: Majapi Deploy
+
+on:
+  workflow_call:
+    inputs:
+      deploy_production:
+        description: Force a production deploy (workflow_dispatch).
+        type: boolean
+        default: false
+      ci_ref:
+        description: Ref of majapisoftwares/ci whose scripts this run uses; matches the major tag.
+        type: string
+        default: v2
+    outputs:
+      type:
+        description: Detected app type (static, container or none).
+        value: ${{ jobs.detect.outputs.type }}
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      type: ${{ steps.detect.outputs.type }}
+      framework: ${{ steps.detect.outputs.framework }}
+      build_dir: ${{ steps.detect.outputs.build_dir }}
+      production: ${{ steps.events.outputs.production }}
+      preview: ${{ steps.events.outputs.preview }}
+      cleanup: ${{ steps.events.outputs.cleanup }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: majapisoftwares/ci
+          ref: ${{ inputs.ci_ref }}
+          path: .majapi-ci
+      - id: detect
+        run: node .majapi-ci/scripts/detect.mjs . >> "$GITHUB_OUTPUT"
+      - id: events
+        env:
+          DEFAULT_BRANCH_PUSH: ${{ github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+          FORCED: ${{ inputs.deploy_production }}
+          IS_PR: ${{ github.event_name == 'pull_request' }}
+          PR_ACTION: ${{ github.event.action }}
+        run: |
+          production=false; preview=false; cleanup=false
+          if [ "$DEFAULT_BRANCH_PUSH" = true ] || [ "$FORCED" = true ]; then production=true; fi
+          if [ "$IS_PR" = true ] && [ "$PR_ACTION" != closed ]; then preview=true; fi
+          if [ "$IS_PR" = true ] && [ "$PR_ACTION" = closed ]; then cleanup=true; fi
+          printf 'production=%s\npreview=%s\ncleanup=%s\n' "$production" "$preview" "$cleanup" >> "$GITHUB_OUTPUT"
+      - run: echo "Detected ${{ steps.detect.outputs.type }} (${{ steps.detect.outputs.framework }})" >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------- Static Web App (S3 + CloudFront) ----------
+
+  static_preview:
+    needs: detect
+    if: needs.detect.outputs.type == 'static' && needs.detect.outputs.preview == 'true'
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+      BUILD_DIR: ${{ vars.STATIC_BUILD_DIR || needs.detect.outputs.build_dir }}
+      S3_BUCKET: ${{ vars.CATALOG_BUCKET || vars.STATIC_APP_BUCKET }}
+      ROLE_ARN: ${{ vars.CATALOG_DEPLOY_ROLE_ARN || vars.AWS_DEPLOY_ROLE_ARN }}
+      DISTRIBUTION_ID: ${{ vars.CATALOG_DISTRIBUTION_ID || vars.CLOUDFRONT_DISTRIBUTION_ID }}
+      PUBLIC_URL: ${{ vars.PUBLIC_APP_URL }}
+      PR_KEY: previews/pr-${{ github.event.pull_request.number }}
+    environment:
+      name: preview-pr-${{ github.event.pull_request.number }}
+      url: ${{ vars.PUBLIC_APP_URL }}/previews/pr-${{ github.event.pull_request.number }}/
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - if: env.ROLE_ARN != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Upload preview to S3
+        if: env.ROLE_ARN != '' && env.S3_BUCKET != ''
+        run: aws s3 sync "$BUILD_DIR" "s3://$S3_BUCKET/$PR_KEY" --delete --cache-control "public,max-age=60"
+      - name: Invalidate preview
+        if: env.ROLE_ARN != '' && env.DISTRIBUTION_ID != ''
+        run: aws cloudfront create-invalidation --distribution-id "$DISTRIBUTION_ID" --paths "/$PR_KEY/*"
+      - name: Comment preview URL
+        if: env.PUBLIC_URL != ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const url = `${process.env.PUBLIC_URL}/${process.env.PR_KEY}/`;
+            const body = `### Majapi Preview\n\n${url}`;
+            const { data: comments } = await github.rest.issues.listComments({ ...context.repo, issue_number: context.issue.number });
+            const existing = comments.find((c) => c.body?.startsWith('### Majapi Preview'));
+            if (existing) await github.rest.issues.updateComment({ ...context.repo, comment_id: existing.id, body });
+            else await github.rest.issues.createComment({ ...context.repo, issue_number: context.issue.number, body });
+
+  static_cleanup:
+    needs: detect
+    if: needs.detect.outputs.type == 'static' && needs.detect.outputs.cleanup == 'true'
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+      S3_BUCKET: ${{ vars.CATALOG_BUCKET || vars.STATIC_APP_BUCKET }}
+      ROLE_ARN: ${{ vars.CATALOG_DEPLOY_ROLE_ARN || vars.AWS_DEPLOY_ROLE_ARN }}
+      DISTRIBUTION_ID: ${{ vars.CATALOG_DISTRIBUTION_ID || vars.CLOUDFRONT_DISTRIBUTION_ID }}
+      PR_KEY: previews/pr-${{ github.event.pull_request.number }}
+    steps:
+      - if: env.ROLE_ARN != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - if: env.ROLE_ARN != '' && env.S3_BUCKET != ''
+        run: aws s3 rm "s3://$S3_BUCKET/$PR_KEY" --recursive
+      - if: env.ROLE_ARN != '' && env.DISTRIBUTION_ID != ''
+        run: aws cloudfront create-invalidation --distribution-id "$DISTRIBUTION_ID" --paths "/$PR_KEY/*"
+
+  static_production:
+    needs: detect
+    if: needs.detect.outputs.type == 'static' && needs.detect.outputs.production == 'true'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: ${{ github.repository }}-production
+      cancel-in-progress: false
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+      BUILD_DIR: ${{ vars.STATIC_BUILD_DIR || needs.detect.outputs.build_dir }}
+      S3_BUCKET: ${{ vars.CATALOG_BUCKET || vars.STATIC_APP_BUCKET }}
+      ROLE_ARN: ${{ vars.CATALOG_DEPLOY_ROLE_ARN || vars.AWS_DEPLOY_ROLE_ARN }}
+      DISTRIBUTION_ID: ${{ vars.CATALOG_DISTRIBUTION_ID || vars.CLOUDFRONT_DISTRIBUTION_ID }}
+    environment:
+      name: production
+      url: ${{ vars.PUBLIC_APP_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - if: env.ROLE_ARN != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Upload to S3
+        if: env.ROLE_ARN != '' && env.S3_BUCKET != ''
+        run: |
+          aws s3 sync "$BUILD_DIR" "s3://$S3_BUCKET" --delete --exclude "previews/*" --exclude "*.html" --exclude "*.txt" --exclude release.json --cache-control "public,max-age=31536000,immutable"
+          cd "$BUILD_DIR"
+          find . \( -name "*.html" -o -name "*.txt" -o -name release.json \) | sed 's#^./##' | while read -r file; do
+            key="$file"
+            case "$file" in
+              index.html|*/index.html) ;;
+              *.html) key="${file%.html}" ;;
+            esac
+            case "$file" in *.html) type=text/html;; *.txt) type=text/plain;; *) type=application/json;; esac
+            aws s3 cp "$file" "s3://$S3_BUCKET/$key" --content-type "$type" --cache-control "no-cache"
+          done
+      - name: Invalidate CDN
+        if: env.ROLE_ARN != '' && env.DISTRIBUTION_ID != ''
+        run: aws cloudfront create-invalidation --distribution-id "$DISTRIBUTION_ID" --paths "/*"
+
+  # ---------- Container ----------
+
+  container_classify:
+    needs: detect
+    if: needs.detect.outputs.type == 'container' && needs.detect.outputs.preview == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      mode: ${{ steps.classify.outputs.mode }}
+      run_migrations: ${{ steps.classify.outputs.run_migrations }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/checkout@v4
+        with:
+          repository: majapisoftwares/ci
+          ref: ${{ inputs.ci_ref }}
+          path: .majapi-ci
+      - id: classify
+        env:
+          PREVIEW_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PREVIEW_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PREVIEW_LABELS_JSON: ${{ toJson(github.event.pull_request.labels.*.name) }}
+        run: |
+          RESULT="$(node .majapi-ci/scripts/classify-preview-deploy.mjs)"
+          echo "mode=$(node -p 'JSON.parse(process.argv[1]).mode' "$RESULT")" >> "$GITHUB_OUTPUT"
+          echo "run_migrations=$(node -p 'JSON.parse(process.argv[1]).runMigrations' "$RESULT")" >> "$GITHUB_OUTPUT"
+
+  container_preview:
+    needs: [detect, container_classify]
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION || 'sa-east-1' }}
+      ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+      PREVIEW_URL: https://pr-${{ github.event.pull_request.number }}.${{ vars.PREVIEW_BASE_DOMAIN || 'preview.majapi.com' }}
+      MODE: ${{ needs.container_classify.outputs.mode }}
+    environment:
+      name: preview-pr-${{ github.event.pull_request.number }}
+      url: https://pr-${{ github.event.pull_request.number }}.${{ vars.PREVIEW_BASE_DOMAIN || 'preview.majapi.com' }}
+    steps:
+      - uses: actions/checkout@v4
+      - if: env.MODE != 'fast' && env.ROLE_ARN != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - if: needs.container_classify.outputs.run_migrations == 'true'
+        run: if npm run | grep -q " migrate"; then npm run migrate; fi
+      - run: npm run build
+      - name: Comment preview URL
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = `### Majapi Preview\n\n${process.env.PREVIEW_URL}\n\nMode: ${process.env.MODE === 'fast' ? 'fast' : 'full'}`;
+            const { data: comments } = await github.rest.issues.listComments({ ...context.repo, issue_number: context.issue.number });
+            const existing = comments.find((c) => c.body?.startsWith('### Majapi Preview'));
+            if (existing) await github.rest.issues.updateComment({ ...context.repo, comment_id: existing.id, body });
+            else await github.rest.issues.createComment({ ...context.repo, issue_number: context.issue.number, body });
+
+  container_production:
+    needs: detect
+    if: needs.detect.outputs.type == 'container' && needs.detect.outputs.production == 'true'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: ${{ github.repository }}-production
+      cancel-in-progress: false
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION || 'sa-east-1' }}
+      ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+    environment:
+      name: production
+      url: ${{ vars.PRODUCTION_APP_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - if: env.ROLE_ARN != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npm run build
