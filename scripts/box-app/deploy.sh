@@ -42,7 +42,7 @@ ln -s "${DEPS_DIR}/node_modules" "${RELEASE_DIR}/node_modules"
 
 # Runtime env: the secret holds dotenv text.
 aws secretsmanager get-secret-value --secret-id "$SECRET_ARN" --query SecretString --output text > "${APP_ROOT}/runtime.env.new"
-printf '\nNODE_ENV=production\nPORT=%s\nHOSTNAME=127.0.0.1\nDEPLOYMENT_SHA=%s\n' "$PORT" "$GIT_SHA" >> "${APP_ROOT}/runtime.env.new"
+printf '\nNODE_ENV=production\nPORT=%s\nHOSTNAME=127.0.0.1\nDEPLOYMENT_SHA=%s\nNEXT_DEPLOYMENT_ID=%s\n' "$PORT" "$GIT_SHA" "$GIT_SHA" >> "${APP_ROOT}/runtime.env.new"
 chmod 600 "${APP_ROOT}/runtime.env.new"
 mv "${APP_ROOT}/runtime.env.new" "${APP_ROOT}/runtime.env"
 
