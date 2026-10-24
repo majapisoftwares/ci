@@ -152,7 +152,11 @@ mkdir -p /etc/caddy/sites /opt/app/releases /opt/app/deps
 cat > /etc/caddy/Caddyfile <<'CADDY'
 import /etc/caddy/sites/*.caddy
 CADDY
-echo ':80 { respond "starting" 503 }' > /etc/caddy/sites/default.caddy
+cat > /etc/caddy/sites/default.caddy <<'STARTING'
+:80 {
+  respond "starting" 503
+}
+STARTING
 cat > /etc/systemd/system/caddy.service <<'UNIT'
 [Unit]
 Description=Caddy

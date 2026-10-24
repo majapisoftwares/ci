@@ -83,7 +83,9 @@ SITES=""
 for domain in $(printf '%s' "$DOMAINS" | tr ',' ' '); do SITES="${SITES:+$SITES, }$domain"; done
 printf '%s {\n  encode zstd gzip\n  reverse_proxy 127.0.0.1:%s\n}\n' "$SITES" "$PORT" > /etc/caddy/sites/app.caddy
 rm -f /etc/caddy/sites/default.caddy
-systemctl reload caddy
+/usr/local/bin/caddy validate --config /etc/caddy/Caddyfile
+systemctl reset-failed caddy
+systemctl reload-or-restart caddy
 
 # Keep the three newest releases and their dependency sets.
 find "${APP_ROOT}/releases" -mindepth 1 -maxdepth 1 -printf '%T@ %p\n' | sort -rn | tail -n +4 | cut -d' ' -f2- | xargs -r rm -rf
