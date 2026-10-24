@@ -200,7 +200,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
-      - run: echo "Built only; add a `container` block to .majapi/ci.json to deploy." >> "$GITHUB_STEP_SUMMARY"
+      - run: echo 'Built only; add a container block to .majapi/ci.json to deploy.' >> "$GITHUB_STEP_SUMMARY"
 
   container_classify:
     needs: detect
@@ -741,6 +741,7 @@ jobs:
           set -eu
           gh pr list --repo "$GITHUB_REPOSITORY" --state open --limit 200 --json number,isCrossRepository,updatedAt > prs.json
           aws s3api list-objects-v2 --bucket "${{ vars.PULUMI_STATE_BUCKET }}" --prefix ".pulumi/stacks/" --query "Contents[].Key" --output json > stacks.json
+          # shellcheck disable=SC2016 # JS template literals, not shell expansions
           node -e '
             const fs = require("node:fs");
             const stacks = new Set((JSON.parse(fs.readFileSync("stacks.json", "utf8")) ?? []).map((key) => key.match(/([^/]+)\.json$/)?.[1]));
