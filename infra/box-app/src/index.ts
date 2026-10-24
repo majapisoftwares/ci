@@ -10,7 +10,7 @@
 //   rootVolumeGb     default 8
 //   dataVolumeGb     default 1, mounted at /data
 //   policyStatements JSON array of extra IAM statements for the app's role
-// Env: RUNTIME_ENV is stored as the app's runtime secret (dotenv text).
+// Env: RUNTIME_ENV (dotenv text) plus RUNTIME_SECRET_<NAME> vars form the runtime secret.
 import * as aws from "@pulumi/aws";
 import * as pulumi from "@pulumi/pulumi";
 
@@ -56,9 +56,14 @@ const runtimeSecret = new aws.secretsmanager.Secret("runtime", {
   recoveryWindowInDays: 0,
   tags,
 });
+// RUNTIME_SECRET_<NAME> env vars become NAME=value lines, so single secrets
+// (e.g. an OAuth client secret) can live in their own GitHub secret.
+const extraSecretLines = Object.entries(process.env)
+  .filter(([key, value]) => key.startsWith("RUNTIME_SECRET_") && value)
+  .map(([key, value]) => `${key.slice("RUNTIME_SECRET_".length)}=${value}`);
 new aws.secretsmanager.SecretVersion("runtime", {
   secretId: runtimeSecret.id,
-  secretString: process.env.RUNTIME_ENV || "# set RUNTIME_ENV\n",
+  secretString: [process.env.RUNTIME_ENV || "# set RUNTIME_ENV", ...extraSecretLines].join("\n") + "\n",
 });
 
 const role = new aws.iam.Role("box", {
