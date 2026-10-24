@@ -1,15 +1,17 @@
-// Keeps one preview comment per PR up to date: node preview-comment.mjs <building|ready|failed|removed> <url>
+// Keeps one preview comment per PR up to date:
+//   node preview-comment.mjs <building|ready|failed|removed> <url> [details]
+// details is appended to the ready line, e.g. "· [app](https://...) · compiled".
 // Needs GH_TOKEN, GITHUB_REPOSITORY, PR_NUMBER and GITHUB_RUN_ID/GITHUB_SERVER_URL (set by Actions).
 import { execFileSync } from "node:child_process";
 
 const MARKER = "<!-- majapi-preview -->";
-const [state, url] = process.argv.slice(2);
+const [state, url, details] = process.argv.slice(2);
 const { GITHUB_REPOSITORY: repo, PR_NUMBER: pr, GITHUB_SERVER_URL: server, GITHUB_RUN_ID: runId } = process.env;
 const run = `${server}/${repo}/actions/runs/${runId}`;
 
 const lines = {
   building: `⏳ Gerando preview… ([execução](${run}))`,
-  ready: `✅ Preview: **${url}**`,
+  ready: `✅ Preview: **${url}**${details ? ` ${details}` : ""}`,
   failed: `❌ O preview falhou. ([execução](${run}))`,
   removed: "🧹 Preview removido.",
 };

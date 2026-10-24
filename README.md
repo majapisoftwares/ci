@@ -5,7 +5,7 @@ One reusable GitHub Actions workflow for every Majapi repository. It detects the
 | Detected | Preview (PR) | Production (push to default branch) |
 | --- | --- | --- |
 | `static`: Next.js `output: export`, Vite SPA | `https://pr-<n>-<repo>.preview.majapi.com`, commented on the PR, removed when the PR closes | S3 sync + CloudFront invalidation |
-| `container`: Dockerfile, Next.js SSR, server framework | Build only (container previews aren't hosted yet) | Build only |
+| `container`: Dockerfile, Next.js SSR, server framework | On the shared preview box (fast, compiled or full), commented on the PR | Compiled release on the production box, or `pulumi up` for infra changes |
 | `none`: extension, agent skill, CLI, library, docs | — | — |
 
 ## Use
@@ -64,6 +64,56 @@ Static previews share one bucket behind `*.preview.majapi.com`: a CloudFront fun
 | `PREVIEW_BUCKET` | shared preview bucket |
 | `PREVIEW_DEPLOY_ROLE_ARN` | role trusted for `pull_request` runs of `majapisoftwares/*` |
 | `PREVIEW_BASE_DOMAIN` | `preview.majapi.com` |
+
+## Container apps
+
+Containers deploy to EC2 boxes over SSM, with Pulumi for infrastructure. Without a `container` block in `.majapi/ci.json` a container repo is only built.
+
+| Event | What runs |
+| --- | --- |
+| Push to the default branch | The classifier picks a **compiled release** (build, upload, run the app's deploy script on the production box) or, for infra changes, **`pulumi up`** on the `production` stack. |
+| PR opened/updated | The shared preview box is started (and provisioned via the `preview-shared` stack if missing). A **compiled preview** always deploys; a **fast preview** (source only) deploys when the classifier allows it; a **full preview** stack (`pr-<n>`) when it requires it. One PR comment shows the latest link. |
+| PR closed | The `pr-<n>` stack is destroyed, the app's removal script runs on the box, and the box **stops** if no open PR needs it. |
+| Daily schedule | Full preview stacks of PRs idle for a day are destroyed; the box stops when idle. |
+| `workflow_dispatch` | `deploy_production` forces `pulumi up`; `cleanup_preview_pr` removes one PR's preview, or `shared` destroys the shared preview stack when no PR is open. |
+
+The app keeps what is specific to it: its Pulumi project, the scripts that run on its boxes, and this block:
+
+```json
+{
+  "type": "container",
+  "container": {
+    "classifier": "scripts/classify-preview-deploy.mjs",
+    "healthPath": "/api/health/ready",
+    "release": {
+      "appRoot": "/opt/app/apps/app-${ctx.environment}",
+      "deployScript": "scripts/deploy-compiled-release.sh",
+      "runtimeHashFile": "scripts/Dockerfile.compiled-runtime"
+    },
+    "production": { "box": "app-production-box", "runtimeSecretPrefix": "app-production/runtime-", "domains": "${vars.PRODUCTION_DOMAIN}", "buildCommand": "npm run build", "cpu": "2.0", "memory": "3072m" },
+    "preview": {
+      "box": "app-preview-box", "runtimeSecretPrefix": "app-preview/runtime-",
+      "publicDomain": "pr-${ctx.prNumber}.${vars.PREVIEW_DOMAIN}", "appDomain": "app.pr-${ctx.prNumber}.${vars.PREVIEW_DOMAIN}",
+      "buildCommand": "npm run build:preview", "fastRoot": "/opt/app/fast-previews/pr-${ctx.prNumber}",
+      "fastScript": "scripts/deploy-fast-preview.sh", "removeScript": "scripts/remove-preview.sh"
+    },
+    "pulumi": {
+      "workDir": "infra/pulumi", "project": "app-aws",
+      "config": { "aws:region": "${vars.AWS_REGION:-sa-east-1}" },
+      "stacks": {
+        "production": { "config": { "app-aws:imageTag": "${ctx.imageTag}" }, "env": { "RUNTIME_ENV": "PRODUCTION_ENV" } },
+        "preview": { "config": {} },
+        "previewShared": { "config": {} }
+      }
+    }
+  }
+}
+```
+
+- **Placeholders**: `${vars.NAME}`, `${vars.NAME:-fallback}`, `${vars.NAME:+text}` and `${ctx.NAME}` (`prNumber`, `environment`, `stack`, `deploymentEnvironment`, `imageTag`, `gitSha`).
+- **`env`** maps environment variables for the Pulumi program to secret names; callers pass `secrets: inherit`.
+- **Box scripts** keep a fixed argument order (see `scripts/container/publish-release.sh` and `fast-preview.sh`); the removal script gets the PR number.
+- **Required**: `AWS_ROLE_ARN` (secret) or `AWS_DEPLOY_ROLE_ARN` (variable), `PULUMI_STATE_BUCKET`, `PULUMI_CONFIG_PASSPHRASE`. `AWS_BUILD_RUNNER` picks a larger runner for builds.
 
 ## Repository variables
 

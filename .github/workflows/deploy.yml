@@ -1,5 +1,6 @@
 # Majapi reusable CI/CD: detects the app type, then runs the static (S3 + CloudFront)
-# or container path. Repos with nothing to deploy skip every deploy job.
+# or container path (boxes + Pulumi, see README). Repos with nothing to deploy
+# skip every deploy job.
 name: Majapi Deploy
 
 on:
@@ -9,6 +10,10 @@ on:
         description: Force a production deploy (workflow_dispatch).
         type: boolean
         default: false
+      cleanup_preview_pr:
+        description: Container repos only. PR number whose preview to remove, or "shared" to destroy the shared preview stack.
+        type: string
+        default: ""
       ci_ref:
         description: Ref of majapisoftwares/ci whose scripts this run uses; matches the major tag.
         type: string
@@ -25,6 +30,8 @@ jobs:
       type: ${{ steps.detect.outputs.type }}
       framework: ${{ steps.detect.outputs.framework }}
       build_dir: ${{ steps.detect.outputs.build_dir }}
+      # "container" only when .majapi/ci.json configures boxes and Pulumi.
+      container: ${{ steps.detect.outputs.container }}
       production: ${{ steps.events.outputs.production }}
       preview: ${{ steps.events.outputs.preview }}
       cleanup: ${{ steps.events.outputs.cleanup }}
@@ -38,7 +45,9 @@ jobs:
           ref: ${{ inputs.ci_ref }}
           path: .majapi-ci
       - id: detect
-        run: node .majapi-ci/scripts/detect.mjs . >> "$GITHUB_OUTPUT"
+        run: |
+          node .majapi-ci/scripts/detect.mjs . >> "$GITHUB_OUTPUT"
+          echo "container=$(node -p 'try { Boolean(require("./.majapi/ci.json").container) } catch { false }')" >> "$GITHUB_OUTPUT"
       - id: events
         env:
           DEFAULT_BRANCH_PUSH: ${{ github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
@@ -171,14 +180,36 @@ jobs:
         if: env.ROLE_ARN != '' && env.DISTRIBUTION_ID != ''
         run: aws cloudfront create-invalidation --distribution-id "$DISTRIBUTION_ID" --paths "/*"
 
-  # ---------- Container ----------
+  # ---------- Container (boxes + Pulumi, configured by .majapi/ci.json `container`) ----------
+  #
+  # Production: compiled releases deploy straight to the production box; changes
+  # the classifier marks as full (infra, Dockerfile, ...) run `pulumi up`.
+  # Previews: a shared preview box hosts every PR. Fast previews ship source,
+  # compiled previews ship a build, full previews get their own Pulumi stack.
+  # The box stops when no open PR needs it and starts again on the next deploy.
+
+  container_build:
+    needs: detect
+    if: needs.detect.outputs.type == 'container' && needs.detect.outputs.container != 'true' && (needs.detect.outputs.preview == 'true' || needs.detect.outputs.production == 'true')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: echo "Built only; add a `container` block to .majapi/ci.json to deploy." >> "$GITHUB_STEP_SUMMARY"
 
   container_classify:
     needs: detect
-    if: needs.detect.outputs.type == 'container' && needs.detect.outputs.preview == 'true'
+    if: needs.detect.outputs.container == 'true' && (needs.detect.outputs.preview == 'true' || (github.event_name == 'push' && needs.detect.outputs.production == 'true'))
     runs-on: ubuntu-latest
     outputs:
       mode: ${{ steps.classify.outputs.mode }}
+      reason: ${{ steps.classify.outputs.reason }}
+      requires_full: ${{ steps.classify.outputs.requires_full }}
       run_migrations: ${{ steps.classify.outputs.run_migrations }}
     steps:
       - uses: actions/checkout@v4
@@ -191,61 +222,644 @@ jobs:
           path: .majapi-ci
       - id: classify
         env:
-          PREVIEW_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          PREVIEW_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          PREVIEW_LABELS_JSON: ${{ toJson(github.event.pull_request.labels.*.name) }}
+          # On PR updates, classify only what changed since the previous preview.
+          BASE: ${{ github.event_name == 'push' && format('{0}^', github.sha) || (github.event.action == 'synchronize' && github.event.before || github.event.pull_request.base.sha) }}
+          FALLBACK_BASE: ${{ github.event.pull_request.base.sha || format('{0}^', github.sha) }}
+          PREVIEW_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          PREVIEW_LABELS_JSON: ${{ github.event_name == 'push' && '[]' || toJson(github.event.pull_request.labels.*.name) }}
         run: |
-          RESULT="$(node .majapi-ci/scripts/classify-preview-deploy.mjs)"
-          echo "mode=$(node -p 'JSON.parse(process.argv[1]).mode' "$RESULT")" >> "$GITHUB_OUTPUT"
-          echo "run_migrations=$(node -p 'JSON.parse(process.argv[1]).runMigrations' "$RESULT")" >> "$GITHUB_OUTPUT"
+          set -eu
+          PREVIEW_BASE_SHA="$BASE"
+          git cat-file -e "${PREVIEW_BASE_SHA}^{commit}" 2>/dev/null || PREVIEW_BASE_SHA="$FALLBACK_BASE"
+          export PREVIEW_BASE_SHA
+          # The app's own classifier wins (it knows its runtime layout).
+          CLASSIFIER="$(node -p 'require("./.majapi/ci.json").container.classifier || ""')"
+          [ -n "$CLASSIFIER" ] || CLASSIFIER=.majapi-ci/scripts/classify-preview-deploy.mjs
+          RESULT="$(node "$CLASSIFIER")"
+          for key in mode reason requiresFull runMigrations; do
+            name="$(printf '%s' "$key" | sed 's/[A-Z]/_\L&/g')"
+            echo "${name}=$(node -p "String(JSON.parse(process.argv[1]).${key})" "$RESULT")" >> "$GITHUB_OUTPUT"
+          done
+          echo "Classified as $(node -p 'JSON.parse(process.argv[1]).mode' "$RESULT")"
 
-  # Builds only: container previews aren't hosted yet, so no URL is published.
-  container_preview:
+  container_production_full:
     needs: [detect, container_classify]
-    runs-on: ubuntu-latest
-    env:
-      AWS_REGION: ${{ vars.AWS_REGION || 'sa-east-1' }}
-      ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
-      MODE: ${{ needs.container_classify.outputs.mode }}
-    steps:
-      - uses: actions/checkout@v4
-      - if: env.MODE != 'fast' && env.ROLE_ARN != ''
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ env.ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: npm
-      - run: npm ci
-      - if: needs.container_classify.outputs.run_migrations == 'true'
-        run: if npm run | grep -q " migrate"; then npm run migrate; fi
-      - run: npm run build
-
-  container_production:
-    needs: detect
-    if: needs.detect.outputs.type == 'container' && needs.detect.outputs.production == 'true'
-    runs-on: ubuntu-latest
+    if: always() && needs.detect.outputs.container == 'true' && ((github.event_name == 'push' && needs.detect.outputs.production == 'true' && needs.container_classify.outputs.requires_full == 'true') || (github.event_name == 'workflow_dispatch' && inputs.deploy_production))
+    runs-on: ${{ vars.AWS_BUILD_RUNNER || 'ubuntu-latest' }}
     concurrency:
-      group: ${{ github.repository }}-production
+      group: pulumi-production
       cancel-in-progress: false
-    env:
-      AWS_REGION: ${{ vars.AWS_REGION || 'sa-east-1' }}
-      ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
     environment:
       name: production
-      url: ${{ vars.PRODUCTION_APP_URL }}
+      url: ${{ steps.pulumi.outputs.appUrl }}
     steps:
       - uses: actions/checkout@v4
-      - if: env.ROLE_ARN != ''
-        uses: aws-actions/configure-aws-credentials@v4
+      - uses: actions/checkout@v4
         with:
-          role-to-assume: ${{ env.ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
+          repository: majapisoftwares/ci
+          ref: ${{ inputs.ci_ref }}
+          path: .majapi-ci
+      - id: cfg
+        env:
+          VARS_JSON: ${{ toJson(vars) }}
+          SECRETS_JSON: ${{ toJson(secrets) }}
+          CTX_STACK: production
+          CTX_ENVIRONMENT: production
+          CTX_DEPLOYMENT_ENVIRONMENT: production
+          CTX_GIT_SHA: ${{ github.sha }}
+        run: |
+          export CTX_IMAGE_TAG="${GITHUB_SHA::12}"
+          node .majapi-ci/scripts/container/config.mjs pulumi production
+          node .majapi-ci/scripts/container/config.mjs values production
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
           cache: npm
+          cache-dependency-path: ${{ steps.cfg.outputs.work_dir }}/package-lock.json
       - run: npm ci
-      - run: npm run build
+        working-directory: ${{ steps.cfg.outputs.work_dir }}
+      - name: Reclaim runner disk for the image build
+        if: vars.AWS_BUILD_RUNNER == ''
+        run: |
+          sudo rm -rf /usr/local/lib/android /opt/hostedtoolcache/CodeQL
+          docker system prune --all --force || true
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN || vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'sa-east-1' }}
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.pulumi/plugins
+            ~/.pulumi/policies
+          key: ${{ runner.os }}-pulumi-${{ hashFiles(format('{0}/package-lock.json', steps.cfg.outputs.work_dir)) }}
+          restore-keys: ${{ runner.os }}-pulumi-
+      - run: sh .majapi-ci/scripts/container/pulumi-state.sh clear-lock "${{ vars.PULUMI_STATE_BUCKET }}" "${{ steps.cfg.outputs.project }}" production
+      - id: pulumi
+        uses: pulumi/actions@v7
+        with:
+          cloud-url: s3://${{ vars.PULUMI_STATE_BUCKET }}
+          command: up
+          comment-on-summary: true
+          config-map: ${{ steps.cfg.outputs.config_map }}
+          refresh: true
+          stack-name: production
+          upsert: true
+          work-dir: ${{ steps.cfg.outputs.work_dir }}
+        env:
+          PULUMI_CONFIG_PASSPHRASE: ${{ secrets.PULUMI_CONFIG_PASSPHRASE }}
+
+  container_production_compiled:
+    needs: [detect, container_classify]
+    if: needs.detect.outputs.container == 'true' && github.event_name == 'push' && needs.detect.outputs.production == 'true' && needs.container_classify.outputs.requires_full != 'true'
+    runs-on: ${{ vars.AWS_BUILD_RUNNER || 'ubuntu-latest' }}
+    concurrency:
+      group: pulumi-production
+      cancel-in-progress: false
+    environment:
+      name: production
+      url: ${{ steps.deploy.outputs.url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: majapisoftwares/ci
+          ref: ${{ inputs.ci_ref }}
+          path: .majapi-ci
+      - id: cfg
+        env:
+          VARS_JSON: ${{ toJson(vars) }}
+          CTX_ENVIRONMENT: production
+        run: node .majapi-ci/scripts/container/config.mjs values production
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+      - run: ${{ steps.cfg.outputs.buildCommand || 'npm run build' }}
+        env:
+          NEXT_DEPLOYMENT_ID: ${{ github.sha }}
+          NODE_OPTIONS: --max-old-space-size=4096
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN || vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'sa-east-1' }}
+      - id: deploy
+        env:
+          ENVIRONMENT_NAME: production
+          DOMAINS: ${{ steps.cfg.outputs.domains }}
+          BOX: ${{ steps.cfg.outputs.box }}
+          SECRET_PREFIX: ${{ steps.cfg.outputs.runtimeSecretPrefix }}
+          ARTIFACT_BUCKET: ${{ vars.PULUMI_STATE_BUCKET }}
+          APP_ROOT: ${{ steps.cfg.outputs.appRoot }}
+          DEPLOY_SCRIPT: ${{ steps.cfg.outputs.deployScript }}
+          RUNTIME_HASH_FILE: ${{ steps.cfg.outputs.runtimeHashFile }}
+          RUN_MIGRATIONS: ${{ needs.container_classify.outputs.run_migrations }}
+          CPU: ${{ steps.cfg.outputs.cpu }}
+          MEMORY: ${{ steps.cfg.outputs.memory }}
+        run: echo "url=$(sh .majapi-ci/scripts/container/publish-release.sh | tail -n 1)" >> "$GITHUB_OUTPUT"
+      - name: Verify production
+        run: curl -kfsSL "${{ steps.deploy.outputs.url }}${{ steps.cfg.outputs.healthPath }}" >/dev/null
+
+  container_preview_shared:
+    needs: detect
+    if: needs.detect.outputs.container == 'true' && needs.detect.outputs.preview == 'true' && github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    concurrency:
+      group: pulumi-preview-shared
+      cancel-in-progress: false
+    environment:
+      name: preview-pr-${{ github.event.pull_request.number }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: majapisoftwares/ci
+          ref: ${{ inputs.ci_ref }}
+          path: .majapi-ci
+      - id: cfg
+        env:
+          VARS_JSON: ${{ toJson(vars) }}
+          CTX_PR_NUMBER: ${{ github.event.pull_request.number }}
+          CTX_ENVIRONMENT: pr-${{ github.event.pull_request.number }}
+        run: node .majapi-ci/scripts/container/config.mjs values preview
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN || vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'sa-east-1' }}
+      # A stopped box is started, not treated as missing.
+      - run: sh .majapi-ci/scripts/container/box.sh start "${{ steps.cfg.outputs.box }}"
+      - id: shared
+        env:
+          BOX: ${{ steps.cfg.outputs.box }}
+          SECRET_PREFIX: ${{ steps.cfg.outputs.runtimeSecretPrefix }}
+          CACHE_REPOSITORY: ${{ steps.cfg.outputs.buildCacheRepository }}
+        run: |
+          set -eu
+          ready=true
+          ID="$(sh .majapi-ci/scripts/container/box.sh id "$BOX")"
+          { [ -n "$ID" ] && [ "$ID" != None ]; } || ready=false
+          [ "$(aws secretsmanager list-secrets --filters "Key=name,Values=${SECRET_PREFIX}" --query 'length(SecretList)' --output text)" -gt 0 ] || ready=false
+          if [ -n "$CACHE_REPOSITORY" ]; then
+            aws ecr describe-repositories --repository-names "$CACHE_REPOSITORY" >/dev/null 2>&1 || ready=false
+          fi
+          echo "provision=$([ "$ready" = true ] && echo false || echo true)" >> "$GITHUB_OUTPUT"
+      - id: pulumi_cfg
+        if: steps.shared.outputs.provision == 'true'
+        env:
+          VARS_JSON: ${{ toJson(vars) }}
+          SECRETS_JSON: ${{ toJson(secrets) }}
+          CTX_STACK: preview-shared
+          CTX_ENVIRONMENT: preview-shared
+          CTX_DEPLOYMENT_ENVIRONMENT: preview-shared
+          CTX_IMAGE_TAG: preview-shared
+          CTX_GIT_SHA: ${{ github.sha }}
+        run: node .majapi-ci/scripts/container/config.mjs pulumi previewShared
+      - if: steps.shared.outputs.provision == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: ${{ steps.pulumi_cfg.outputs.work_dir }}/package-lock.json
+      - if: steps.shared.outputs.provision == 'true'
+        run: npm ci
+        working-directory: ${{ steps.pulumi_cfg.outputs.work_dir }}
+      - if: steps.shared.outputs.provision == 'true'
+        run: sh .majapi-ci/scripts/container/pulumi-state.sh clear-lock "${{ vars.PULUMI_STATE_BUCKET }}" "${{ steps.pulumi_cfg.outputs.project }}" preview-shared
+      - if: steps.shared.outputs.provision == 'true'
+        uses: pulumi/actions@v7
+        with:
+          cloud-url: s3://${{ vars.PULUMI_STATE_BUCKET }}
+          command: up
+          comment-on-summary: true
+          config-map: ${{ steps.pulumi_cfg.outputs.config_map }}
+          refresh: true
+          stack-name: preview-shared
+          upsert: true
+          work-dir: ${{ steps.pulumi_cfg.outputs.work_dir }}
+        env:
+          PULUMI_CONFIG_PASSPHRASE: ${{ secrets.PULUMI_CONFIG_PASSPHRASE }}
+      - if: steps.shared.outputs.provision == 'true'
+        run: sh .majapi-ci/scripts/container/box.sh start "${{ steps.cfg.outputs.box }}"
+
+  container_preview_fast:
+    needs: [detect, container_classify, container_preview_shared]
+    if: needs.container_classify.result == 'success' && needs.container_preview_shared.result == 'success' && (needs.container_classify.outputs.mode == 'fast' || needs.container_classify.outputs.mode == 'both')
+    runs-on: ubuntu-latest
+    concurrency:
+      group: fast-preview-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    environment:
+      name: preview-pr-${{ github.event.pull_request.number }}
+      url: https://${{ steps.cfg.outputs.publicDomain }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: majapisoftwares/ci
+          ref: ${{ inputs.ci_ref }}
+          path: .majapi-ci
+      - id: cfg
+        env:
+          VARS_JSON: ${{ toJson(vars) }}
+          CTX_PR_NUMBER: ${{ github.event.pull_request.number }}
+          CTX_ENVIRONMENT: pr-${{ github.event.pull_request.number }}
+        run: node .majapi-ci/scripts/container/config.mjs values preview
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN || vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'sa-east-1' }}
+      - env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BOX: ${{ steps.cfg.outputs.box }}
+          SECRET_PREFIX: ${{ steps.cfg.outputs.runtimeSecretPrefix }}
+          ARTIFACT_BUCKET: ${{ vars.PULUMI_STATE_BUCKET }}
+          FAST_ROOT: ${{ steps.cfg.outputs.fastRoot }}
+          FAST_SCRIPT: ${{ steps.cfg.outputs.fastScript }}
+          PUBLIC_DOMAIN: ${{ steps.cfg.outputs.publicDomain }}
+          APP_DOMAIN: ${{ steps.cfg.outputs.appDomain }}
+          RUN_MIGRATIONS: ${{ needs.container_classify.outputs.run_migrations }}
+        run: sh .majapi-ci/scripts/container/fast-preview.sh
+      - run: python3 .majapi-ci/scripts/container/wait-https.py "https://${{ steps.cfg.outputs.publicDomain }}" "https://${{ steps.cfg.outputs.appDomain }}"
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: node .majapi-ci/scripts/preview-comment.mjs ready "https://${{ steps.cfg.outputs.publicDomain }}" "· [app](https://${{ steps.cfg.outputs.appDomain }}) · rápido · \`${GITHUB_SHA::7}\`"
+
+  container_preview_compiled:
+    needs: [detect, container_preview_shared]
+    if: needs.container_preview_shared.result == 'success'
+    runs-on: ${{ vars.AWS_BUILD_RUNNER || 'ubuntu-latest' }}
+    concurrency:
+      group: compiled-preview-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    environment:
+      name: preview-pr-${{ github.event.pull_request.number }}
+      url: https://${{ steps.cfg.outputs.publicDomain }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: majapisoftwares/ci
+          ref: ${{ inputs.ci_ref }}
+          path: .majapi-ci
+      - id: cfg
+        env:
+          VARS_JSON: ${{ toJson(vars) }}
+          CTX_PR_NUMBER: ${{ github.event.pull_request.number }}
+          CTX_ENVIRONMENT: pr-${{ github.event.pull_request.number }}
+        run: node .majapi-ci/scripts/container/config.mjs values preview
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: node .majapi-ci/scripts/preview-comment.mjs building "https://${{ steps.cfg.outputs.publicDomain }}"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+      - run: ${{ steps.cfg.outputs.buildCommand || 'npm run build' }}
+        env:
+          NEXT_DEPLOYMENT_ID: ${{ github.sha }}
+          NODE_OPTIONS: --max-old-space-size=4096
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN || vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'sa-east-1' }}
+      - run: sh .majapi-ci/scripts/container/box.sh start "${{ steps.cfg.outputs.box }}"
+      # The app's start script runs the same idempotent migration gate, so the
+      # compiled release doesn't wait for the classifier.
+      - env:
+          ENVIRONMENT_NAME: pr-${{ github.event.pull_request.number }}
+          DOMAINS: ${{ steps.cfg.outputs.publicDomain }}, ${{ steps.cfg.outputs.appDomain }}
+          BOX: ${{ steps.cfg.outputs.box }}
+          SECRET_PREFIX: ${{ steps.cfg.outputs.runtimeSecretPrefix }}
+          ARTIFACT_BUCKET: ${{ vars.PULUMI_STATE_BUCKET }}
+          APP_ROOT: ${{ steps.cfg.outputs.appRoot }}
+          DEPLOY_SCRIPT: ${{ steps.cfg.outputs.deployScript }}
+          RUNTIME_HASH_FILE: ${{ steps.cfg.outputs.runtimeHashFile }}
+          RUN_MIGRATIONS: "false"
+          CPU: ${{ steps.cfg.outputs.cpu }}
+          MEMORY: ${{ steps.cfg.outputs.memory }}
+          APP_DOMAIN: ${{ steps.cfg.outputs.appDomain }}
+          PUBLIC_DOMAIN: ${{ steps.cfg.outputs.publicDomain }}
+        run: sh .majapi-ci/scripts/container/publish-release.sh
+      - run: python3 .majapi-ci/scripts/container/wait-https.py "https://${{ steps.cfg.outputs.publicDomain }}" "https://${{ steps.cfg.outputs.appDomain }}"
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: node .majapi-ci/scripts/preview-comment.mjs ready "https://${{ steps.cfg.outputs.publicDomain }}" "· [app](https://${{ steps.cfg.outputs.appDomain }}) · compilado · \`${GITHUB_SHA::7}\`"
+      - if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: node .majapi-ci/scripts/preview-comment.mjs failed "https://${{ steps.cfg.outputs.publicDomain }}"
+
+  container_preview_full:
+    needs: [detect, container_classify, container_preview_shared, container_preview_fast, container_preview_compiled]
+    if: always() && needs.container_classify.result == 'success' && needs.container_preview_shared.result == 'success' && needs.container_preview_compiled.result == 'success' && needs.container_classify.outputs.requires_full == 'true'
+    runs-on: ${{ vars.AWS_BUILD_RUNNER || 'ubuntu-latest' }}
+    concurrency:
+      group: pulumi-preview-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    environment:
+      name: preview-pr-${{ github.event.pull_request.number }}
+      url: ${{ steps.pulumi.outputs.appUrl }}
+    steps:
+      - name: Skip when the PR is no longer open
+        id: open
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: echo "open=$([ "$(gh pr view ${{ github.event.pull_request.number }} --repo "$GITHUB_REPOSITORY" --json state --jq .state)" = OPEN ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      - if: steps.open.outputs.open == 'true'
+        uses: actions/checkout@v4
+      - if: steps.open.outputs.open == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: majapisoftwares/ci
+          ref: ${{ inputs.ci_ref }}
+          path: .majapi-ci
+      - id: cfg
+        if: steps.open.outputs.open == 'true'
+        env:
+          VARS_JSON: ${{ toJson(vars) }}
+          SECRETS_JSON: ${{ toJson(secrets) }}
+          CTX_PR_NUMBER: ${{ github.event.pull_request.number }}
+          CTX_STACK: pr-${{ github.event.pull_request.number }}
+          CTX_ENVIRONMENT: pr-${{ github.event.pull_request.number }}
+          CTX_DEPLOYMENT_ENVIRONMENT: preview
+          CTX_GIT_SHA: ${{ github.sha }}
+        run: |
+          export CTX_IMAGE_TAG="pr-${CTX_PR_NUMBER}-${GITHUB_SHA::12}"
+          node .majapi-ci/scripts/container/config.mjs pulumi preview
+          node .majapi-ci/scripts/container/config.mjs values preview
+      - if: steps.open.outputs.open == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: ${{ steps.cfg.outputs.work_dir }}/package-lock.json
+      - if: steps.open.outputs.open == 'true'
+        run: npm ci
+        working-directory: ${{ steps.cfg.outputs.work_dir }}
+      - if: steps.open.outputs.open == 'true' && vars.AWS_BUILD_RUNNER == ''
+        run: |
+          sudo rm -rf /usr/local/lib/android /opt/hostedtoolcache/CodeQL
+          docker system prune --all --force || true
+      - if: steps.open.outputs.open == 'true'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN || vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'sa-east-1' }}
+      - if: steps.open.outputs.open == 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.pulumi/plugins
+            ~/.pulumi/policies
+          key: ${{ runner.os }}-pulumi-${{ hashFiles(format('{0}/package-lock.json', steps.cfg.outputs.work_dir)) }}
+          restore-keys: ${{ runner.os }}-pulumi-
+      - if: steps.open.outputs.open == 'true'
+        run: sh .majapi-ci/scripts/container/pulumi-state.sh clear-lock "${{ vars.PULUMI_STATE_BUCKET }}" "${{ steps.cfg.outputs.project }}" "pr-${{ github.event.pull_request.number }}"
+      - id: pulumi
+        if: steps.open.outputs.open == 'true'
+        uses: pulumi/actions@v7
+        with:
+          cloud-url: s3://${{ vars.PULUMI_STATE_BUCKET }}
+          command: up
+          comment-on-summary: true
+          config-map: ${{ steps.cfg.outputs.config_map }}
+          refresh: true
+          stack-name: pr-${{ github.event.pull_request.number }}
+          upsert: true
+          work-dir: ${{ steps.cfg.outputs.work_dir }}
+        env:
+          PULUMI_CONFIG_PASSPHRASE: ${{ secrets.PULUMI_CONFIG_PASSPHRASE }}
+      - name: Wait for the full preview
+        if: steps.open.outputs.open == 'true'
+        env:
+          APP_URL: ${{ steps.pulumi.outputs.appUrl }}
+        run: |
+          set -eu
+          [ -n "$APP_URL" ] || { echo "Pulumi did not return appUrl." >&2; exit 1; }
+          for _ in $(seq 1 60); do
+            curl -kfsSL "${APP_URL%/}${{ steps.cfg.outputs.healthPath }}" >/dev/null && exit 0
+            sleep 10
+          done
+          echo "Full preview ${APP_URL} did not become ready." >&2
+          exit 1
+      - if: steps.open.outputs.open == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: node .majapi-ci/scripts/preview-comment.mjs ready "${{ steps.pulumi.outputs.appUrl }}" "· completo · \`${GITHUB_SHA::7}\`"
+
+  container_cleanup:
+    needs: detect
+    if: needs.detect.outputs.container == 'true' && ((needs.detect.outputs.cleanup == 'true' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'workflow_dispatch' && inputs.cleanup_preview_pr != '' && inputs.cleanup_preview_pr != 'shared'))
+    runs-on: ubuntu-latest
+    concurrency:
+      group: pulumi-preview-${{ github.event.pull_request.number || inputs.cleanup_preview_pr }}
+      cancel-in-progress: true
+    environment:
+      name: preview-pr-${{ github.event.pull_request.number || inputs.cleanup_preview_pr }}
+    env:
+      PR_NUMBER: ${{ github.event.pull_request.number || inputs.cleanup_preview_pr }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: majapisoftwares/ci
+          ref: ${{ inputs.ci_ref }}
+          path: .majapi-ci
+      - id: cfg
+        env:
+          VARS_JSON: ${{ toJson(vars) }}
+          CTX_PR_NUMBER: ${{ env.PR_NUMBER }}
+          CTX_ENVIRONMENT: pr-${{ env.PR_NUMBER }}
+        run: |
+          case "$PR_NUMBER" in ''|*[!0-9]*) echo "cleanup_preview_pr must be a PR number." >&2; exit 1 ;; esac
+          node .majapi-ci/scripts/container/config.mjs values preview
+          echo "work_dir=$(node -p 'require("./.majapi/ci.json").container.pulumi?.workDir || "infra/pulumi"')" >> "$GITHUB_OUTPUT"
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN || vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'sa-east-1' }}
+      - id: stack
+        run: echo "exists=$(sh .majapi-ci/scripts/container/pulumi-state.sh exists "${{ vars.PULUMI_STATE_BUCKET }}" "pr-${PR_NUMBER}")" >> "$GITHUB_OUTPUT"
+      - if: steps.stack.outputs.exists == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: ${{ steps.cfg.outputs.work_dir }}/package-lock.json
+      - if: steps.stack.outputs.exists == 'true'
+        run: npm ci
+        working-directory: ${{ steps.cfg.outputs.work_dir }}
+      - if: steps.stack.outputs.exists == 'true'
+        run: sh .majapi-ci/scripts/container/pulumi-state.sh clear-lock "${{ vars.PULUMI_STATE_BUCKET }}" "$(node -p 'require("./.majapi/ci.json").container.pulumi.project')" "pr-${PR_NUMBER}"
+      - if: steps.stack.outputs.exists == 'true'
+        uses: pulumi/actions@v7
+        with:
+          cloud-url: s3://${{ vars.PULUMI_STATE_BUCKET }}
+          command: destroy
+          remove: true
+          stack-name: pr-${{ env.PR_NUMBER }}
+          work-dir: ${{ steps.cfg.outputs.work_dir }}
+        env:
+          PULUMI_CONFIG_PASSPHRASE: ${{ secrets.PULUMI_CONFIG_PASSPHRASE }}
+      - if: steps.cfg.outputs.removeScript != ''
+        run: sh .majapi-ci/scripts/container/remove-preview.sh "${{ steps.cfg.outputs.box }}" "${{ steps.cfg.outputs.removeScript }}" "$PR_NUMBER"
+      - if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node .majapi-ci/scripts/preview-comment.mjs removed ""
+
+  container_find_expired:
+    needs: detect
+    if: needs.detect.outputs.container == 'true' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.cleanup_preview_pr == ''))
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.find.outputs.matrix }}
+    environment:
+      name: preview-pr-shared
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN || vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'sa-east-1' }}
+      # Full preview stacks of PRs idle for a day are destroyed; the PR's next
+      # push recreates them.
+      - id: find
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          gh pr list --repo "$GITHUB_REPOSITORY" --state open --limit 200 --json number,isCrossRepository,updatedAt > prs.json
+          aws s3api list-objects-v2 --bucket "${{ vars.PULUMI_STATE_BUCKET }}" --prefix ".pulumi/stacks/" --query "Contents[].Key" --output json > stacks.json
+          node -e '
+            const fs = require("node:fs");
+            const stacks = new Set((JSON.parse(fs.readFileSync("stacks.json", "utf8")) ?? []).map((key) => key.match(/([^/]+)\.json$/)?.[1]));
+            const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+            const expired = JSON.parse(fs.readFileSync("prs.json", "utf8"))
+              .filter((pr) => !pr.isCrossRepository && Date.parse(pr.updatedAt) <= cutoff && stacks.has(`pr-${pr.number}`))
+              .map((pr) => String(pr.number));
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, `matrix=${JSON.stringify(expired)}\n`);
+            console.log(`${expired.length} expired preview stack(s).`);
+          '
+
+  container_destroy_expired:
+    needs: [detect, container_find_expired]
+    if: needs.container_find_expired.outputs.matrix != '[]' && needs.container_find_expired.outputs.matrix != ''
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pr: ${{ fromJson(needs.container_find_expired.outputs.matrix) }}
+    concurrency:
+      group: pulumi-preview-${{ matrix.pr }}
+      cancel-in-progress: false
+    environment:
+      name: preview-pr-${{ matrix.pr }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: cfg
+        run: |
+          echo "work_dir=$(node -p 'require("./.majapi/ci.json").container.pulumi?.workDir || "infra/pulumi"')" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: ${{ steps.cfg.outputs.work_dir }}/package-lock.json
+      - run: npm ci
+        working-directory: ${{ steps.cfg.outputs.work_dir }}
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN || vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'sa-east-1' }}
+      - uses: pulumi/actions@v7
+        with:
+          cloud-url: s3://${{ vars.PULUMI_STATE_BUCKET }}
+          command: destroy
+          remove: true
+          stack-name: pr-${{ matrix.pr }}
+          work-dir: ${{ steps.cfg.outputs.work_dir }}
+        env:
+          PULUMI_CONFIG_PASSPHRASE: ${{ secrets.PULUMI_CONFIG_PASSPHRASE }}
+
+  container_destroy_shared:
+    needs: [detect, container_cleanup]
+    if: always() && needs.detect.outputs.container == 'true' && github.event_name == 'workflow_dispatch' && inputs.cleanup_preview_pr == 'shared'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: pulumi-preview-shared
+      cancel-in-progress: false
+    environment:
+      name: preview-pr-shared
+    steps:
+      - uses: actions/checkout@v4
+      - id: open
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: echo "count=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --json isCrossRepository --jq '[.[] | select(.isCrossRepository | not)] | length')" >> "$GITHUB_OUTPUT"
+      - id: cfg
+        run: |
+          echo "work_dir=$(node -p 'require("./.majapi/ci.json").container.pulumi?.workDir || "infra/pulumi"')" >> "$GITHUB_OUTPUT"
+      - if: steps.open.outputs.count == '0'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: ${{ steps.cfg.outputs.work_dir }}/package-lock.json
+      - if: steps.open.outputs.count == '0'
+        run: npm ci
+        working-directory: ${{ steps.cfg.outputs.work_dir }}
+      - if: steps.open.outputs.count == '0'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN || vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'sa-east-1' }}
+      - if: steps.open.outputs.count == '0'
+        uses: pulumi/actions@v7
+        with:
+          cloud-url: s3://${{ vars.PULUMI_STATE_BUCKET }}
+          command: destroy
+          remove: true
+          stack-name: preview-shared
+          work-dir: ${{ steps.cfg.outputs.work_dir }}
+        env:
+          PULUMI_CONFIG_PASSPHRASE: ${{ secrets.PULUMI_CONFIG_PASSPHRASE }}
+
+  container_stop_idle_preview_box:
+    needs: [detect, container_cleanup]
+    if: always() && needs.detect.outputs.container == 'true' && (github.event_name == 'schedule' || needs.detect.outputs.cleanup == 'true')
+    runs-on: ubuntu-latest
+    concurrency:
+      group: pulumi-preview-shared
+      cancel-in-progress: false
+    environment:
+      name: preview-pr-shared
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: majapisoftwares/ci
+          ref: ${{ inputs.ci_ref }}
+          path: .majapi-ci
+      - id: cfg
+        env:
+          VARS_JSON: ${{ toJson(vars) }}
+          CTX_PR_NUMBER: "0"
+          CTX_ENVIRONMENT: preview-shared
+        run: node .majapi-ci/scripts/container/config.mjs values preview
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN || vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'sa-east-1' }}
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: sh .majapi-ci/scripts/container/box.sh stop-if-idle "${{ steps.cfg.outputs.box }}"
