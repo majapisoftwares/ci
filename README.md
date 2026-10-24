@@ -4,8 +4,8 @@ One reusable GitHub Actions workflow for every Majapi repository. It detects the
 
 | Detected | Preview (PR) | Production (push to default branch) |
 | --- | --- | --- |
-| `static`: Next.js `output: export`, Vite SPA | S3 under `previews/pr-<n>/` + CloudFront invalidation, removed when the PR closes | S3 sync + CloudFront invalidation |
-| `container`: Dockerfile, Next.js SSR, server framework | Classified fast/full preview at `pr-<n>.<PREVIEW_BASE_DOMAIN>` | Build with AWS OIDC |
+| `static`: Next.js `output: export`, Vite SPA | `https://pr-<n>-<repo>.preview.majapi.com`, commented on the PR, removed when the PR closes | S3 sync + CloudFront invalidation |
+| `container`: Dockerfile, Next.js SSR, server framework | Build only (container previews aren't hosted yet) | Build only |
 | `none`: extension, agent skill, CLI, library, docs | — | — |
 
 ## Use
@@ -55,14 +55,24 @@ When detection is wrong, add `.majapi/ci.json`:
 
 `type` is `static`, `container` or `none`.
 
+## Previews
+
+Static previews share one bucket behind `*.preview.majapi.com`: a CloudFront function maps `<slug>.preview.majapi.com/<path>` to `s3://<PREVIEW_BUCKET>/<slug>/<path>`, resolving `/` to `index.html` and extensionless paths to `.html`. Caching is disabled there, so every push is visible immediately. These organization variables configure it for every repository:
+
+| Variable | Value |
+| --- | --- |
+| `PREVIEW_BUCKET` | shared preview bucket |
+| `PREVIEW_DEPLOY_ROLE_ARN` | role trusted for `pull_request` runs of `majapisoftwares/*` |
+| `PREVIEW_BASE_DOMAIN` | `preview.majapi.com` |
+
 ## Repository variables
 
 | Variable | Used by |
 | --- | --- |
 | `AWS_REGION` | both (defaults: `us-east-1` static, `sa-east-1` container) |
 | `AWS_DEPLOY_ROLE_ARN` | both |
-| `STATIC_APP_BUCKET`, `CLOUDFRONT_DISTRIBUTION_ID`, `PUBLIC_APP_URL`, `STATIC_BUILD_DIR` | static |
-| `PREVIEW_BASE_DOMAIN`, `PRODUCTION_APP_URL` | container |
+| `STATIC_APP_BUCKET`, `CLOUDFRONT_DISTRIBUTION_ID`, `PUBLIC_APP_URL`, `STATIC_BUILD_DIR` | static production |
+| `PRODUCTION_APP_URL` | container production |
 
 `CATALOG_BUCKET`, `CATALOG_DEPLOY_ROLE_ARN` and `CATALOG_DISTRIBUTION_ID` are still read for repositories set up before v2.
 

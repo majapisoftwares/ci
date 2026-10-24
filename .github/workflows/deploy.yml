@@ -28,6 +28,8 @@ jobs:
       production: ${{ steps.events.outputs.production }}
       preview: ${{ steps.events.outputs.preview }}
       cleanup: ${{ steps.events.outputs.cleanup }}
+      preview_slug: ${{ steps.events.outputs.preview_slug }}
+      preview_url: ${{ steps.events.outputs.preview_url }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
@@ -43,12 +45,20 @@ jobs:
           FORCED: ${{ inputs.deploy_production }}
           IS_PR: ${{ github.event_name == 'pull_request' }}
           PR_ACTION: ${{ github.event.action }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          PREVIEW_BASE_DOMAIN: ${{ vars.PREVIEW_BASE_DOMAIN || 'preview.majapi.com' }}
         run: |
           production=false; preview=false; cleanup=false
           if [ "$DEFAULT_BRANCH_PUSH" = true ] || [ "$FORCED" = true ]; then production=true; fi
           if [ "$IS_PR" = true ] && [ "$PR_ACTION" != closed ]; then preview=true; fi
           if [ "$IS_PR" = true ] && [ "$PR_ACTION" = closed ]; then cleanup=true; fi
           printf 'production=%s\npreview=%s\ncleanup=%s\n' "$production" "$preview" "$cleanup" >> "$GITHUB_OUTPUT"
+          if [ "$IS_PR" = true ]; then
+            # One DNS label: pr-<n>-<repo>, lowercase, at most 63 characters.
+            slug=$(printf 'pr-%s-%s' "$PR_NUMBER" "$REPO_NAME" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-' | cut -c1-63 | sed 's/-*$//')
+            printf 'preview_slug=%s\npreview_url=https://%s.%s\n' "$slug" "$slug" "$PREVIEW_BASE_DOMAIN" >> "$GITHUB_OUTPUT"
+          fi
       - run: echo "Detected ${{ steps.detect.outputs.type }} (${{ steps.detect.outputs.framework }})" >> "$GITHUB_STEP_SUMMARY"
 
   # ---------- Static Web App (S3 + CloudFront) ----------
@@ -57,68 +67,62 @@ jobs:
     needs: detect
     if: needs.detect.outputs.type == 'static' && needs.detect.outputs.preview == 'true'
     runs-on: ubuntu-latest
+    # Previews share one bucket served at <slug>.<PREVIEW_BASE_DOMAIN> (org variables).
     env:
-      AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
       BUILD_DIR: ${{ vars.STATIC_BUILD_DIR || needs.detect.outputs.build_dir }}
-      S3_BUCKET: ${{ vars.CATALOG_BUCKET || vars.STATIC_APP_BUCKET }}
-      ROLE_ARN: ${{ vars.CATALOG_DEPLOY_ROLE_ARN || vars.AWS_DEPLOY_ROLE_ARN }}
-      DISTRIBUTION_ID: ${{ vars.CATALOG_DISTRIBUTION_ID || vars.CLOUDFRONT_DISTRIBUTION_ID }}
-      PUBLIC_URL: ${{ vars.PUBLIC_APP_URL }}
-      PR_KEY: previews/pr-${{ github.event.pull_request.number }}
+      PREVIEW_BUCKET: ${{ vars.PREVIEW_BUCKET }}
+      SLUG: ${{ needs.detect.outputs.preview_slug }}
+      PREVIEW_URL: ${{ needs.detect.outputs.preview_url }}
+      GH_TOKEN: ${{ github.token }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
     environment:
       name: preview-pr-${{ github.event.pull_request.number }}
-      url: ${{ vars.PUBLIC_APP_URL }}/previews/pr-${{ github.event.pull_request.number }}/
+      url: ${{ needs.detect.outputs.preview_url }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: majapisoftwares/ci
+          ref: ${{ inputs.ci_ref }}
+          path: .majapi-ci
+      - run: node .majapi-ci/scripts/preview-comment.mjs building "$PREVIEW_URL"
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
           cache: npm
       - run: npm ci
       - run: npm run build
-      - if: env.ROLE_ARN != ''
-        uses: aws-actions/configure-aws-credentials@v4
+      - uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ env.ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
-      - name: Upload preview to S3
-        if: env.ROLE_ARN != '' && env.S3_BUCKET != ''
-        run: aws s3 sync "$BUILD_DIR" "s3://$S3_BUCKET/$PR_KEY" --delete --cache-control "public,max-age=60"
-      - name: Invalidate preview
-        if: env.ROLE_ARN != '' && env.DISTRIBUTION_ID != ''
-        run: aws cloudfront create-invalidation --distribution-id "$DISTRIBUTION_ID" --paths "/$PR_KEY/*"
-      - name: Comment preview URL
-        if: env.PUBLIC_URL != ''
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const url = `${process.env.PUBLIC_URL}/${process.env.PR_KEY}/`;
-            const body = `### Majapi Preview\n\n${url}`;
-            const { data: comments } = await github.rest.issues.listComments({ ...context.repo, issue_number: context.issue.number });
-            const existing = comments.find((c) => c.body?.startsWith('### Majapi Preview'));
-            if (existing) await github.rest.issues.updateComment({ ...context.repo, comment_id: existing.id, body });
-            else await github.rest.issues.createComment({ ...context.repo, issue_number: context.issue.number, body });
+          role-to-assume: ${{ vars.PREVIEW_DEPLOY_ROLE_ARN }}
+          aws-region: us-east-1
+      - name: Upload preview
+        run: aws s3 sync "$BUILD_DIR" "s3://$PREVIEW_BUCKET/$SLUG" --delete
+      - run: node .majapi-ci/scripts/preview-comment.mjs ready "$PREVIEW_URL"
+      - if: failure()
+        run: node .majapi-ci/scripts/preview-comment.mjs failed "$PREVIEW_URL"
 
   static_cleanup:
     needs: detect
     if: needs.detect.outputs.type == 'static' && needs.detect.outputs.cleanup == 'true'
     runs-on: ubuntu-latest
     env:
-      AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
-      S3_BUCKET: ${{ vars.CATALOG_BUCKET || vars.STATIC_APP_BUCKET }}
-      ROLE_ARN: ${{ vars.CATALOG_DEPLOY_ROLE_ARN || vars.AWS_DEPLOY_ROLE_ARN }}
-      DISTRIBUTION_ID: ${{ vars.CATALOG_DISTRIBUTION_ID || vars.CLOUDFRONT_DISTRIBUTION_ID }}
-      PR_KEY: previews/pr-${{ github.event.pull_request.number }}
+      PREVIEW_BUCKET: ${{ vars.PREVIEW_BUCKET }}
+      SLUG: ${{ needs.detect.outputs.preview_slug }}
+      GH_TOKEN: ${{ github.token }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
     steps:
-      - if: env.ROLE_ARN != ''
-        uses: aws-actions/configure-aws-credentials@v4
+      - uses: actions/checkout@v4
         with:
-          role-to-assume: ${{ env.ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
-      - if: env.ROLE_ARN != '' && env.S3_BUCKET != ''
-        run: aws s3 rm "s3://$S3_BUCKET/$PR_KEY" --recursive
-      - if: env.ROLE_ARN != '' && env.DISTRIBUTION_ID != ''
-        run: aws cloudfront create-invalidation --distribution-id "$DISTRIBUTION_ID" --paths "/$PR_KEY/*"
+          repository: majapisoftwares/ci
+          ref: ${{ inputs.ci_ref }}
+          path: .majapi-ci
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.PREVIEW_DEPLOY_ROLE_ARN }}
+          aws-region: us-east-1
+      - run: aws s3 rm "s3://$PREVIEW_BUCKET/$SLUG" --recursive
+      - run: node .majapi-ci/scripts/preview-comment.mjs removed "${{ needs.detect.outputs.preview_url }}"
 
   static_production:
     needs: detect
@@ -195,17 +199,14 @@ jobs:
           echo "mode=$(node -p 'JSON.parse(process.argv[1]).mode' "$RESULT")" >> "$GITHUB_OUTPUT"
           echo "run_migrations=$(node -p 'JSON.parse(process.argv[1]).runMigrations' "$RESULT")" >> "$GITHUB_OUTPUT"
 
+  # Builds only: container previews aren't hosted yet, so no URL is published.
   container_preview:
     needs: [detect, container_classify]
     runs-on: ubuntu-latest
     env:
       AWS_REGION: ${{ vars.AWS_REGION || 'sa-east-1' }}
       ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
-      PREVIEW_URL: https://pr-${{ github.event.pull_request.number }}.${{ vars.PREVIEW_BASE_DOMAIN || 'preview.majapi.com' }}
       MODE: ${{ needs.container_classify.outputs.mode }}
-    environment:
-      name: preview-pr-${{ github.event.pull_request.number }}
-      url: https://pr-${{ github.event.pull_request.number }}.${{ vars.PREVIEW_BASE_DOMAIN || 'preview.majapi.com' }}
     steps:
       - uses: actions/checkout@v4
       - if: env.MODE != 'fast' && env.ROLE_ARN != ''
@@ -221,15 +222,6 @@ jobs:
       - if: needs.container_classify.outputs.run_migrations == 'true'
         run: if npm run | grep -q " migrate"; then npm run migrate; fi
       - run: npm run build
-      - name: Comment preview URL
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const body = `### Majapi Preview\n\n${process.env.PREVIEW_URL}\n\nMode: ${process.env.MODE === 'fast' ? 'fast' : 'full'}`;
-            const { data: comments } = await github.rest.issues.listComments({ ...context.repo, issue_number: context.issue.number });
-            const existing = comments.find((c) => c.body?.startsWith('### Majapi Preview'));
-            if (existing) await github.rest.issues.updateComment({ ...context.repo, comment_id: existing.id, body });
-            else await github.rest.issues.createComment({ ...context.repo, issue_number: context.issue.number, body });
 
   container_production:
     needs: detect
