@@ -119,9 +119,11 @@ export const readFromDirectory = (root) => async (path) => {
   }
 };
 
+// No top-level await, so CommonJS loaders (tsx, bundlers) can import this module.
 if (process.argv[1] && import.meta.filename === resolve(process.argv[1])) {
   const root = process.argv[2] ?? ".";
-  const stack = await detectStack(readFromDirectory(root), listDirectory(root));
-  // GitHub Actions step output format.
-  process.stdout.write(`type=${stack.type}\nframework=${stack.framework}\nbuild_dir=${stack.buildDir}\n`);
+  detectStack(readFromDirectory(root), listDirectory(root)).then((stack) => {
+    // GitHub Actions step output format.
+    process.stdout.write(`type=${stack.type}\nframework=${stack.framework}\nbuild_dir=${stack.buildDir}\n`);
+  });
 }
