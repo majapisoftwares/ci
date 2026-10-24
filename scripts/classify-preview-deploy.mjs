@@ -3,6 +3,7 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, relative, resolve, sep } from "node:path";
 
 const INFRA_PATTERNS = [
+  /^\.majapi\/ci\.json$/,
   /^Dockerfile(?:\..+)?$/,
   /^infra\//,
 ];

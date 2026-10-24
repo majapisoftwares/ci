@@ -115,6 +115,39 @@ The app keeps what is specific to it: its Pulumi project, the scripts that run o
 - **Box scripts** keep a fixed argument order (see `scripts/container/publish-release.sh` and `fast-preview.sh`); the removal script gets the PR number.
 - **Required**: `AWS_ROLE_ARN` (secret) or `AWS_DEPLOY_ROLE_ARN` (variable), `PULUMI_STATE_BUCKET`, `PULUMI_CONFIG_PASSPHRASE`. `AWS_BUILD_RUNNER` picks a larger runner for builds.
 
+### Small apps: `box-app`
+
+For a Node.js app that needs one small server, `infra/box-app` is a ready Pulumi program: an ARM EC2 box (`t4g.micro` by default) in the default VPC, Caddy with automatic HTTPS in front of `npm start`, a separate data volume mounted at `/data` (survives box replacement), a static IP, the app's runtime secret and an instance role with extra permissions from config. No preview block means no previews.
+
+```json
+{
+  "type": "container",
+  "container": {
+    "release": { "appRoot": "/opt/app", "deployScript": ".majapi-ci/scripts/box-app/deploy.sh", "shipDependencies": false },
+    "production": {
+      "box": "my-app-box", "runtimeSecretPrefix": "my-app/runtime-", "domains": "app.example.com",
+      "buildCommand": "npm run build", "releaseAfterPulumi": true
+    },
+    "pulumi": {
+      "workDir": ".majapi-ci/infra/box-app", "project": "box-app",
+      "stacks": {
+        "production": {
+          "config": {
+            "aws:region": "${vars.AWS_REGION:-sa-east-1}",
+            "box-app:appName": "my-app",
+            "box-app:domains": "app.example.com",
+            "box-app:policyStatements": "[]"
+          },
+          "env": { "RUNTIME_ENV": "MY_APP_PRODUCTION_ENV" }
+        }
+      }
+    }
+  }
+}
+```
+
+`releaseAfterPulumi` deploys the release right after `pulumi up` (box-app's program creates infrastructure only). `shipDependencies: false` installs production dependencies on the box, so native packages match its CPU. The runtime secret is dotenv text; the app listens on `PORT` (3000). Point the domains' DNS at the stack's `publicIp` output.
+
 ## Repository variables
 
 | Variable | Used by |

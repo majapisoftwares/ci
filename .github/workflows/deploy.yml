@@ -32,6 +32,8 @@ jobs:
       build_dir: ${{ steps.detect.outputs.build_dir }}
       # "container" only when .majapi/ci.json configures boxes and Pulumi.
       container: ${{ steps.detect.outputs.container }}
+      container_preview: ${{ steps.detect.outputs.container_preview }}
+      release_after_pulumi: ${{ steps.detect.outputs.release_after_pulumi }}
       production: ${{ steps.events.outputs.production }}
       preview: ${{ steps.events.outputs.preview }}
       cleanup: ${{ steps.events.outputs.cleanup }}
@@ -47,7 +49,11 @@ jobs:
       - id: detect
         run: |
           node .majapi-ci/scripts/detect.mjs . >> "$GITHUB_OUTPUT"
-          echo "container=$(node -p 'try { Boolean(require("./.majapi/ci.json").container) } catch { false }')" >> "$GITHUB_OUTPUT"
+          {
+            echo "container=$(node -p 'try { Boolean(require("./.majapi/ci.json").container) } catch { false }')"
+            echo "container_preview=$(node -p 'try { Boolean(require("./.majapi/ci.json").container.preview) } catch { false }')"
+            echo "release_after_pulumi=$(node -p 'try { Boolean(require("./.majapi/ci.json").container.production.releaseAfterPulumi) } catch { false }')"
+          } >> "$GITHUB_OUTPUT"
       - id: events
         env:
           DEFAULT_BRANCH_PUSH: ${{ github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
@@ -310,8 +316,12 @@ jobs:
           PULUMI_CONFIG_PASSPHRASE: ${{ secrets.PULUMI_CONFIG_PASSPHRASE }}
 
   container_production_compiled:
-    needs: [detect, container_classify]
-    if: needs.detect.outputs.container == 'true' && github.event_name == 'push' && needs.detect.outputs.production == 'true' && needs.container_classify.outputs.requires_full != 'true'
+    needs: [detect, container_classify, container_production_full]
+    if: >-
+      always() && needs.detect.outputs.container == 'true' && needs.detect.outputs.production == 'true' &&
+      needs.container_production_full.result != 'failure' && needs.container_production_full.result != 'cancelled' &&
+      ((github.event_name == 'push' && needs.container_classify.result == 'success' && needs.container_classify.outputs.requires_full != 'true') ||
+      (needs.detect.outputs.release_after_pulumi == 'true' && needs.container_production_full.result == 'success'))
     runs-on: ${{ vars.AWS_BUILD_RUNNER || 'ubuntu-latest' }}
     concurrency:
       group: pulumi-production
@@ -356,16 +366,17 @@ jobs:
           APP_ROOT: ${{ steps.cfg.outputs.appRoot }}
           DEPLOY_SCRIPT: ${{ steps.cfg.outputs.deployScript }}
           RUNTIME_HASH_FILE: ${{ steps.cfg.outputs.runtimeHashFile }}
-          RUN_MIGRATIONS: ${{ needs.container_classify.outputs.run_migrations }}
+          RUN_MIGRATIONS: ${{ needs.container_classify.outputs.run_migrations || 'false' }}
           CPU: ${{ steps.cfg.outputs.cpu }}
           MEMORY: ${{ steps.cfg.outputs.memory }}
+          SHIP_DEPENDENCIES: ${{ steps.cfg.outputs.shipDependencies || 'true' }}
         run: echo "url=$(sh .majapi-ci/scripts/container/publish-release.sh | tail -n 1)" >> "$GITHUB_OUTPUT"
       - name: Verify production
         run: curl -kfsSL "${{ steps.deploy.outputs.url }}${{ steps.cfg.outputs.healthPath }}" >/dev/null
 
   container_preview_shared:
     needs: detect
-    if: needs.detect.outputs.container == 'true' && needs.detect.outputs.preview == 'true' && github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository
+    if: needs.detect.outputs.container_preview == 'true' && needs.detect.outputs.preview == 'true' && github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     concurrency:
       group: pulumi-preview-shared
@@ -660,7 +671,7 @@ jobs:
 
   container_cleanup:
     needs: detect
-    if: needs.detect.outputs.container == 'true' && ((needs.detect.outputs.cleanup == 'true' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'workflow_dispatch' && inputs.cleanup_preview_pr != '' && inputs.cleanup_preview_pr != 'shared'))
+    if: needs.detect.outputs.container_preview == 'true' && ((needs.detect.outputs.cleanup == 'true' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'workflow_dispatch' && inputs.cleanup_preview_pr != '' && inputs.cleanup_preview_pr != 'shared'))
     runs-on: ubuntu-latest
     concurrency:
       group: pulumi-preview-${{ github.event.pull_request.number || inputs.cleanup_preview_pr }}
@@ -721,7 +732,7 @@ jobs:
 
   container_find_expired:
     needs: detect
-    if: needs.detect.outputs.container == 'true' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.cleanup_preview_pr == ''))
+    if: needs.detect.outputs.container_preview == 'true' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.cleanup_preview_pr == ''))
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.find.outputs.matrix }}
@@ -797,7 +808,7 @@ jobs:
   # cleanup dispatch. The next preview provisions it again with `pulumi up`.
   container_destroy_idle_shared:
     needs: [detect, container_cleanup]
-    if: always() && needs.detect.outputs.container == 'true' && (github.event_name == 'schedule' || needs.detect.outputs.cleanup == 'true' || (github.event_name == 'workflow_dispatch' && inputs.cleanup_preview_pr == 'shared'))
+    if: always() && needs.detect.outputs.container_preview == 'true' && (github.event_name == 'schedule' || needs.detect.outputs.cleanup == 'true' || (github.event_name == 'workflow_dispatch' && inputs.cleanup_preview_pr == 'shared'))
     runs-on: ubuntu-latest
     concurrency:
       group: pulumi-preview-shared

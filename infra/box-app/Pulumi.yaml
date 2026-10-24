@@ -1,0 +1,7 @@
+name: box-app
+description: One small EC2 box running a Node.js app behind Caddy, deployed by majapisoftwares/ci.
+runtime:
+  name: nodejs
+  options:
+    packagemanager: npm
+main: src

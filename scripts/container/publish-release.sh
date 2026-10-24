@@ -2,7 +2,11 @@
 # Packs the built app, uploads it and runs the app's deploy script on its box.
 # Prints the primary URL on the last line. Inputs (env):
 #   ENVIRONMENT_NAME DOMAINS BOX SECRET_PREFIX ARTIFACT_BUCKET APP_ROOT
-#   DEPLOY_SCRIPT RUNTIME_HASH_FILE [RUN_MIGRATIONS CPU MEMORY APP_DOMAIN PUBLIC_DOMAIN]
+#   DEPLOY_SCRIPT [RUNTIME_HASH_FILE RUN_MIGRATIONS CPU MEMORY APP_DOMAIN PUBLIC_DOMAIN
+#   SHIP_DEPENDENCIES]
+# DEPLOY_SCRIPT may live in this repo (.majapi-ci/...); it is then shipped in
+# the release under .majapi-box/. SHIP_DEPENDENCIES=false skips uploading
+# node_modules for boxes that install their own (e.g. a different CPU arch).
 # The deploy script runs from the extracted release with numa's argument order:
 #   <env> <sha> <domains> <secret-arn> <lock-hash> <runtime-hash> <deps-url>
 #   <run-migrations> <cpu> <memory> <app-domain> <public-domain>
@@ -10,7 +14,15 @@ set -eu
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 : "${GITHUB_SHA:?}" "${ENVIRONMENT_NAME:?}" "${DOMAINS:?}" "${BOX:?}" "${SECRET_PREFIX:?}"
-: "${ARTIFACT_BUCKET:?}" "${APP_ROOT:?}" "${DEPLOY_SCRIPT:?}" "${RUNTIME_HASH_FILE:?}"
+: "${ARTIFACT_BUCKET:?}" "${APP_ROOT:?}" "${DEPLOY_SCRIPT:?}"
+RUNTIME_HASH_FILE="${RUNTIME_HASH_FILE:-package-lock.json}"
+case "$DEPLOY_SCRIPT" in
+  .majapi-ci/*)
+    mkdir -p .majapi-box
+    cp "$DEPLOY_SCRIPT" ".majapi-box/$(basename "$DEPLOY_SCRIPT")"
+    DEPLOY_SCRIPT=".majapi-box/$(basename "$DEPLOY_SCRIPT")"
+    ;;
+esac
 RUN_MIGRATIONS="${RUN_MIGRATIONS:-false}"
 TMP="${RUNNER_TEMP:-/tmp}"
 
@@ -22,13 +34,15 @@ DEPENDENCIES_KEY="compiled-dependencies/${LOCK_HASH}.tgz"
 ARTIFACT_KEY="compiled-releases/${ENVIRONMENT_NAME}/${GITHUB_SHA}.tgz"
 
 # Production dependencies are shared by every release with the same lockfile.
-if ! aws s3api head-object --bucket "$ARTIFACT_BUCKET" --key "$DEPENDENCIES_KEY" >/dev/null 2>&1; then
+if [ "${SHIP_DEPENDENCIES:-true}" = false ]; then
+  DEPENDENCIES_URL=-
+elif ! aws s3api head-object --bucket "$ARTIFACT_BUCKET" --key "$DEPENDENCIES_KEY" >/dev/null 2>&1; then
   log "pruning dev dependencies for runtime packaging"
   npm prune --omit=dev --no-audit --no-fund >&2
   tar -czf "${TMP}/dependencies.tgz" node_modules
   aws s3 cp "${TMP}/dependencies.tgz" "s3://${ARTIFACT_BUCKET}/${DEPENDENCIES_KEY}" --only-show-errors
 fi
-DEPENDENCIES_URL="$(aws s3 presign "s3://${ARTIFACT_BUCKET}/${DEPENDENCIES_KEY}" --expires-in 1800)"
+[ "${SHIP_DEPENDENCIES:-true}" = false ] || DEPENDENCIES_URL="$(aws s3 presign "s3://${ARTIFACT_BUCKET}/${DEPENDENCIES_KEY}" --expires-in 1800)"
 
 COMPRESSOR=gzip
 command -v pigz >/dev/null 2>&1 && COMPRESSOR="pigz -1"

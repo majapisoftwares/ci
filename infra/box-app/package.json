@@ -1,0 +1,17 @@
+{
+  "name": "majapi-box-app",
+  "version": "1.0.0",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@pulumi/aws": "^7.32.0",
+    "@pulumi/pulumi": "^3.245.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.14",
+    "typescript": "^5.9.3"
+  }
+}
