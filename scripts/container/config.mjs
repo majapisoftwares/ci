@@ -10,7 +10,7 @@
 //   ${ctx.NAME}             run context (prNumber, stack, environment, ...)
 // VARS_JSON and SECRETS_JSON carry toJson(vars) / toJson(secrets); CTX_* env
 // vars carry the context.
-import { appendFileSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { resolve } from "node:path";
 
@@ -54,6 +54,19 @@ export function resolveDeep(value, vars, ctx) {
 }
 
 const yamlString = (value) => JSON.stringify(String(value));
+
+/** Synchronizes the project name from .majapi/ci.json into Pulumi.yaml (e.g. for box-app template). */
+export function syncPulumiProjectName(workDir, project, root = ".") {
+  if (!project) return;
+  const pulumiYamlPath = resolve(root, workDir, "Pulumi.yaml");
+  if (existsSync(pulumiYamlPath)) {
+    const content = readFileSync(pulumiYamlPath, "utf8");
+    const updated = content.replace(/^name:\s*.+$/m, `name: ${project}`);
+    if (updated !== content) {
+      writeFileSync(pulumiYamlPath, updated, "utf8");
+    }
+  }
+}
 
 /** pulumi/actions `config-map` YAML for one stack kind. */
 export function pulumiConfigMap(config, kind, vars, ctx) {
@@ -106,9 +119,12 @@ if (process.argv[1] && import.meta.filename === resolve(process.argv[1])) {
         .map(([key, value]) => `${key}=${value}`),
     );
   } else if (command === "pulumi") {
+    const workDir = config.pulumi?.workDir ?? "infra/pulumi";
+    const project = config.pulumi?.project;
+    syncPulumiProjectName(workDir, project);
     writeOutput([
-      `work_dir=${config.pulumi?.workDir ?? "infra/pulumi"}`,
-      `project=${config.pulumi?.project ?? ""}`,
+      `work_dir=${workDir}`,
+      `project=${project ?? ""}`,
       ...multiline("config_map", pulumiConfigMap(config, kind, vars, ctx)),
     ]);
     // Secrets go to the job environment for the Pulumi program.

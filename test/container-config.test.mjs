@@ -1,11 +1,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import {
   contextFromEnv,
   interpolate,
   pulumiConfigMap,
   pulumiEnv,
   resolveDeep,
+  syncPulumiProjectName,
 } from "../scripts/container/config.mjs";
 
 const vars = { PREVIEW_DOMAIN: "preview.numa.bz", PRODUCTION_DOMAIN: "numa.business", EMPTY: "" };
@@ -52,4 +56,12 @@ test("maps Pulumi env vars to secrets by name", () => {
   const config = { pulumi: { stacks: { production: { env: { RUNTIME_ENV: "PROD_ENV" } } } } };
   assert.deepEqual(pulumiEnv(config, "production", { PROD_ENV: "x" }), [["RUNTIME_ENV", "x"]]);
   assert.throws(() => pulumiEnv(config, "production", {}), /PROD_ENV/);
+});
+
+test("syncs Pulumi project name into Pulumi.yaml when present", (t) => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "ci-pulumi-test-"));
+  t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(tmpDir, "Pulumi.yaml"), "name: box-app\nruntime: nodejs\n");
+  syncPulumiProjectName(".", "majapi-router-box", tmpDir);
+  assert.equal(fs.readFileSync(path.join(tmpDir, "Pulumi.yaml"), "utf8"), "name: majapi-router-box\nruntime: nodejs\n");
 });
