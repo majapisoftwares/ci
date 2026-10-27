@@ -10,9 +10,14 @@
 //   rootVolumeGb     default 8
 //   dataVolumeGb     default 1, mounted at /data
 //   policyStatements JSON array of extra IAM statements for the app's role
+//   postgres         "true" runs Postgres on the box (data in /data/postgres) and
+//                    adds DATABASE_URL to the runtime secret
+//   generatedKeys    comma-separated names; each becomes NAME=<32 random bytes,
+//                    base64> in the runtime secret, stable across deploys
 // Env: RUNTIME_ENV (dotenv text) plus RUNTIME_SECRET_<NAME> vars form the runtime secret.
 import * as aws from "@pulumi/aws";
 import * as pulumi from "@pulumi/pulumi";
+import * as random from "@pulumi/random";
 
 const config = new pulumi.Config("box-app");
 const appName = config.require("appName");
@@ -24,6 +29,11 @@ const instanceType = config.get("instanceType") ?? "t4g.micro";
 const rootVolumeGb = config.getNumber("rootVolumeGb") ?? 8;
 const dataVolumeGb = config.getNumber("dataVolumeGb") ?? 1;
 const policyStatements: unknown[] = JSON.parse(config.get("policyStatements") ?? "[]");
+const usePostgres = config.getBoolean("postgres") ?? false;
+const generatedKeys = (config.get("generatedKeys") ?? "")
+  .split(",")
+  .map((name) => name.trim())
+  .filter(Boolean);
 const boxName = `${appName}-box`;
 const tags = { Name: boxName, project: appName, "managed-by": "majapisoftwares/ci" };
 
@@ -61,9 +71,23 @@ const runtimeSecret = new aws.secretsmanager.Secret("runtime", {
 const extraSecretLines = Object.entries(process.env)
   .filter(([key, value]) => key.startsWith("RUNTIME_SECRET_") && value)
   .map(([key, value]) => `${key.slice("RUNTIME_SECRET_".length)}=${value}`);
+// Generated values live only in Pulumi state and the runtime secret.
+const generatedLines: pulumi.Output<string>[] = generatedKeys.map(
+  (name) => pulumi.interpolate`${name}=${new random.RandomBytes(`key-${name}`, { length: 32 }).base64}`,
+);
+if (usePostgres) {
+  // deploy.sh starts the database container when it sees BOX_POSTGRES_PASSWORD.
+  const password = new random.RandomPassword("postgres", { length: 32, special: false }).result;
+  generatedLines.push(
+    pulumi.interpolate`BOX_POSTGRES_PASSWORD=${password}`,
+    pulumi.interpolate`DATABASE_URL=postgres://app:${password}@127.0.0.1:5432/app`,
+  );
+}
 new aws.secretsmanager.SecretVersion("runtime", {
   secretId: runtimeSecret.id,
-  secretString: [process.env.RUNTIME_ENV || "# set RUNTIME_ENV", ...extraSecretLines].join("\n") + "\n",
+  secretString: pulumi
+    .all(generatedLines)
+    .apply((lines) => [process.env.RUNTIME_ENV || "# set RUNTIME_ENV", ...extraSecretLines, ...lines].join("\n") + "\n"),
 });
 
 const role = new aws.iam.Role("box", {

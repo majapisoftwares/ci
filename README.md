@@ -148,6 +148,8 @@ For a Node.js app that needs one small server, `infra/box-app` is a ready Pulumi
 
 `releaseAfterPulumi` deploys the release right after `pulumi up` (box-app's program creates infrastructure only). `shipDependencies: false` installs production dependencies on the box, so native packages match its CPU. The runtime secret is dotenv text; the app listens on `PORT` (3000). Point the domains' DNS at the stack's `publicIp` output.
 
+`"box-app:postgres": "true"` runs Postgres (`postgres:18-alpine`, in Docker) on the box, reachable only from it, with its data in `/data/postgres`; the runtime secret gets `DATABASE_URL`. `"box-app:generatedKeys": "NAME,OTHER"` adds each name with 32 random bytes (base64) that stay the same across deploys, for keys the app needs but nobody should handle, such as an encryption key.
+
 ## Repository variables
 
 | Variable | Used by |

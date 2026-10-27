@@ -46,10 +46,33 @@ printf '\nNODE_ENV=production\nPORT=%s\nHOSTNAME=127.0.0.1\nDEPLOYMENT_SHA=%s\nN
 chmod 600 "${APP_ROOT}/runtime.env.new"
 mv "${APP_ROOT}/runtime.env.new" "${APP_ROOT}/runtime.env"
 
+# Postgres on the box (stack config box-app:postgres) when the runtime secret
+# carries BOX_POSTGRES_PASSWORD. Data lives on the persistent /data volume.
+PG_PASSWORD="$(sed -n 's/^BOX_POSTGRES_PASSWORD=//p' "${APP_ROOT}/runtime.env" | tail -n 1)"
+if [ -n "$PG_PASSWORD" ]; then
+  command -v docker >/dev/null 2>&1 || dnf install -y -q docker
+  systemctl enable --now docker >/dev/null 2>&1
+  if ! docker inspect box-postgres >/dev/null 2>&1; then
+    log "starting postgres"
+    mkdir -p /data/postgres
+    PG_ENV="$(mktemp)"
+    printf 'POSTGRES_DB=app\nPOSTGRES_USER=app\nPOSTGRES_PASSWORD=%s\n' "$PG_PASSWORD" > "$PG_ENV"
+    docker run -d --name box-postgres --restart unless-stopped -p 127.0.0.1:5432:5432 \
+      --env-file "$PG_ENV" -v /data/postgres:/var/lib/postgresql postgres:18-alpine >/dev/null
+    rm -f "$PG_ENV"
+  fi
+  ready=false
+  for _ in $(seq 1 30); do
+    docker exec box-postgres pg_isready -U app -d app >/dev/null 2>&1 && { ready=true; break; }
+    sleep 2
+  done
+  [ "$ready" = true ] || { docker logs --tail 30 box-postgres || true; log "postgres did not become ready"; exit 1; }
+fi
+
 cat > /etc/systemd/system/app.service <<UNIT
 [Unit]
 Description=App (box-app)
-After=network-online.target
+After=network-online.target docker.service
 [Service]
 User=app
 WorkingDirectory=${APP_ROOT}/current
