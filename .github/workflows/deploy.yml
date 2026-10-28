@@ -411,8 +411,9 @@ jobs:
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN || vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION || 'sa-east-1' }}
-      # A stopped box is started, not treated as missing.
-      - run: sh .majapi-ci/scripts/container/box.sh start "${{ steps.cfg.outputs.box }}"
+      # A stopped box is started, not treated as missing. A box that never
+      # reaches SSM is left to the check below, which provisions it again.
+      - run: sh .majapi-ci/scripts/container/box.sh start "${{ steps.cfg.outputs.box }}" || echo "Box did not start cleanly; checking whether to provision."
       - id: shared
         env:
           BOX: ${{ steps.cfg.outputs.box }}
