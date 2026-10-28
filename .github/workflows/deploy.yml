@@ -927,7 +927,8 @@ jobs:
           APP: ${{ steps.cfg.outputs.app }}
           CLOUD_URL: ${{ steps.cfg.outputs.cloudUrl }}
           DOMAIN: ${{ steps.cfg.outputs.domain }}
-          ARTIFACT_BUCKET: ${{ vars.PULUMI_STATE_BUCKET }}
+          # Cloud signs downloads from its own bucket; repos with their own state bucket set this.
+          ARTIFACT_BUCKET: ${{ vars.HOSTED_ARTIFACT_BUCKET || vars.PULUMI_STATE_BUCKET }}
         run: |
           set -euo pipefail
           url=$(sh .majapi-ci/scripts/hosted/publish.sh | tail -n 1)
