@@ -18,6 +18,10 @@ on:
         description: Ref of majapisoftwares/ci whose scripts this run uses; matches the major tag.
         type: string
         default: v2
+    secrets:
+      HOSTED_ENV:
+        description: Hosted apps only. The runtime env, for callers outside the organization, where `secrets: inherit` passes nothing; otherwise the secret named by hosted.envSecret is used.
+        required: false
     outputs:
       type:
         description: Detected app type (static, container or none).
@@ -917,7 +921,7 @@ jobs:
         if: steps.cfg.outputs.envSecret != ''
         env:
           APP: ${{ steps.cfg.outputs.app }}
-          RUNTIME_ENV: ${{ secrets[steps.cfg.outputs.envSecret] }}
+          RUNTIME_ENV: ${{ secrets.HOSTED_ENV || secrets[steps.cfg.outputs.envSecret] }}
         run: |
           set -eu
           test -n "$RUNTIME_ENV" || { echo "Secret ${{ steps.cfg.outputs.envSecret }} is empty or missing." >&2; exit 1; }
