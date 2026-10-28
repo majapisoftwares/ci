@@ -20,7 +20,7 @@ on:
         default: v2
     secrets:
       HOSTED_ENV:
-        description: Hosted apps only. The runtime env, for callers outside the organization, where `secrets: inherit` passes nothing; otherwise the secret named by hosted.envSecret is used.
+        description: "Hosted apps only. The runtime env, for callers outside the organization (secrets: inherit passes nothing there); otherwise the secret named by hosted.envSecret is used."
         required: false
     outputs:
       type:
