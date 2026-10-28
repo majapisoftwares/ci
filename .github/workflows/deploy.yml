@@ -431,6 +431,17 @@ jobs:
           if [ -n "$STATE_BUCKET" ]; then
             [ "$(sh .majapi-ci/scripts/container/pulumi-state.sh outputs "$STATE_BUCKET" preview-shared)" = true ] || ready=false
           fi
+          # A box SSM can't reach (e.g. its network was removed by a failed
+          # destroy) can't take deploys; `pulumi up` restores what's missing.
+          if [ "$ready" = true ]; then
+            online=false
+            for attempt in $(seq 1 18); do
+              PING="$(aws ssm describe-instance-information --filters "Key=InstanceIds,Values=$ID" --query 'InstanceInformationList[0].PingStatus' --output text)"
+              if [ "$PING" = Online ]; then online=true; break; fi
+              sleep 10
+            done
+            [ "$online" = true ] || { echo "Box $ID is not reachable through SSM ($PING); provisioning."; ready=false; }
+          fi
           echo "provision=$([ "$ready" = true ] && echo false || echo true)" >> "$GITHUB_OUTPUT"
       - id: pulumi_cfg
         if: steps.shared.outputs.provision == 'true'
