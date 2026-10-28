@@ -198,7 +198,7 @@ jobs:
 
   container_build:
     needs: detect
-    if: needs.detect.outputs.type == 'container' && needs.detect.outputs.container != 'true' && (needs.detect.outputs.preview == 'true' || needs.detect.outputs.production == 'true')
+    if: needs.detect.outputs.type == 'container' && needs.detect.outputs.container != 'true' && needs.detect.outputs.hosted != 'true' && (needs.detect.outputs.preview == 'true' || needs.detect.outputs.production == 'true')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
