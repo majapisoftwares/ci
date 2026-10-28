@@ -897,20 +897,7 @@ jobs:
           ref: ${{ inputs.ci_ref }}
           path: .majapi-ci
       - id: cfg
-        run: |
-          node -e '
-            const { hosted } = require("./.majapi/ci.json");
-            const out = {
-              app: hosted.app,
-              cloudUrl: hosted.cloudUrl || "https://cloud.majapi.com",
-              envSecret: hosted.envSecret || "",
-              buildCommand: hosted.buildCommand || "npm run build",
-              domain: hosted.domain,
-              healthPath: hosted.healthPath || "/",
-            };
-            for (const key of ["app", "domain"]) if (!out[key]) throw new Error(`hosted.${key} is required in .majapi/ci.json`);
-            for (const [key, value] of Object.entries(out)) console.log(`${key}=${value}`);
-          ' >> "$GITHUB_OUTPUT"
+        run: node .majapi-ci/scripts/hosted/config.mjs >> "$GITHUB_OUTPUT"
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
