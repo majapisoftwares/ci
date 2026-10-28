@@ -34,6 +34,7 @@ jobs:
       container: ${{ steps.detect.outputs.container }}
       container_preview: ${{ steps.detect.outputs.container_preview }}
       release_after_pulumi: ${{ steps.detect.outputs.release_after_pulumi }}
+      hosted: ${{ steps.detect.outputs.hosted }}
       production: ${{ steps.events.outputs.production }}
       preview: ${{ steps.events.outputs.preview }}
       cleanup: ${{ steps.events.outputs.cleanup }}
@@ -53,6 +54,7 @@ jobs:
             echo "container=$(node -p 'try { Boolean(require("./.majapi/ci.json").container) } catch { false }')"
             echo "container_preview=$(node -p 'try { Boolean(require("./.majapi/ci.json").container.preview) } catch { false }')"
             echo "release_after_pulumi=$(node -p 'try { Boolean(require("./.majapi/ci.json").container.production.releaseAfterPulumi) } catch { false }')"
+            echo "hosted=$(node -p 'try { Boolean(require("./.majapi/ci.json").hosted) } catch { false }')"
           } >> "$GITHUB_OUTPUT"
       - id: events
         env:
@@ -871,3 +873,64 @@ jobs:
           work-dir: ${{ steps.idle.outputs.work_dir }}
         env:
           PULUMI_CONFIG_PASSPHRASE: ${{ secrets.PULUMI_CONFIG_PASSPHRASE }}
+
+  # Apps on a Majapi Cloud shared host (.majapi/ci.json "hosted"): Cloud places
+  # the release on the app's host and its agent installs it. Replaces one box per app.
+  hosted_production:
+    needs: detect
+    if: needs.detect.outputs.hosted == 'true' && needs.detect.outputs.production == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    concurrency:
+      group: hosted-production-${{ github.repository }}
+      cancel-in-progress: false
+    environment:
+      name: production
+      url: ${{ steps.release.outputs.url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: majapisoftwares/ci
+          ref: ${{ inputs.ci_ref }}
+          path: .majapi-ci
+      - id: cfg
+        run: node .majapi-ci/scripts/hosted/config.mjs >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+      - run: ${{ steps.cfg.outputs.buildCommand }}
+        env:
+          NEXT_DEPLOYMENT_ID: ${{ github.sha }}
+          NODE_OPTIONS: --max-old-space-size=4096
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN || vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'sa-east-1' }}
+      - name: Store the runtime env in SSM
+        if: steps.cfg.outputs.envSecret != ''
+        env:
+          APP: ${{ steps.cfg.outputs.app }}
+          RUNTIME_ENV: ${{ secrets[steps.cfg.outputs.envSecret] }}
+        run: |
+          set -eu
+          test -n "$RUNTIME_ENV" || { echo "Secret ${{ steps.cfg.outputs.envSecret }} is empty or missing." >&2; exit 1; }
+          aws ssm put-parameter --name "/majapi/apps/${APP}/env" --type SecureString --overwrite --value "$RUNTIME_ENV" >/dev/null
+      - id: release
+        env:
+          APP: ${{ steps.cfg.outputs.app }}
+          CLOUD_URL: ${{ steps.cfg.outputs.cloudUrl }}
+          DOMAIN: ${{ steps.cfg.outputs.domain }}
+          ARTIFACT_BUCKET: ${{ vars.PULUMI_STATE_BUCKET }}
+        run: |
+          set -euo pipefail
+          url=$(sh .majapi-ci/scripts/hosted/publish.sh | tail -n 1)
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+      - name: Verify production
+        run: curl -fsSL --retry 18 --retry-all-errors --retry-delay 5 --max-time 15 "${{ steps.release.outputs.url }}${{ steps.cfg.outputs.healthPath }}" >/dev/null
