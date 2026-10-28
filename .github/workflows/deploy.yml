@@ -728,6 +728,11 @@ jobs:
         working-directory: ${{ steps.cfg.outputs.work_dir }}
       - if: steps.stack.outputs.exists == 'true'
         run: sh .majapi-ci/scripts/container/pulumi-state.sh clear-lock "${{ vars.PULUMI_STATE_BUCKET }}" "$(node -p 'require("./.majapi/ci.json").container.pulumi.project')" "pr-${PR_NUMBER}"
+      # Dynamic providers (e.g. DNS records) need the stack's env to delete.
+      - if: steps.stack.outputs.exists == 'true'
+        env:
+          SECRETS_JSON: ${{ toJson(secrets) }}
+        run: node .majapi-ci/scripts/container/config.mjs env preview
       - if: steps.stack.outputs.exists == 'true'
         uses: pulumi/actions@v7
         with:
@@ -808,6 +813,14 @@ jobs:
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN || vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION || 'sa-east-1' }}
+      - uses: actions/checkout@v4
+        with:
+          repository: majapisoftwares/ci
+          ref: ${{ inputs.ci_ref }}
+          path: .majapi-ci
+      - env:
+          SECRETS_JSON: ${{ toJson(secrets) }}
+        run: node .majapi-ci/scripts/container/config.mjs env preview
       - uses: pulumi/actions@v7
         with:
           cloud-url: s3://${{ vars.PULUMI_STATE_BUCKET }}
@@ -870,6 +883,10 @@ jobs:
         working-directory: ${{ steps.idle.outputs.work_dir }}
       - if: steps.stack.outputs.exists == 'true'
         run: sh .majapi-ci/scripts/container/pulumi-state.sh clear-lock "${{ vars.PULUMI_STATE_BUCKET }}" "${{ steps.idle.outputs.project }}" preview-shared
+      - if: steps.stack.outputs.exists == 'true'
+        env:
+          SECRETS_JSON: ${{ toJson(secrets) }}
+        run: node .majapi-ci/scripts/container/config.mjs env previewShared
       - if: steps.stack.outputs.exists == 'true'
         uses: pulumi/actions@v7
         with:

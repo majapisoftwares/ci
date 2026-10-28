@@ -2,6 +2,7 @@
 //
 //   node config.mjs values <production|preview>   -> GITHUB_OUTPUT lines
 //   node config.mjs pulumi <production|preview|previewShared> -> config_map + env
+//   node config.mjs env <production|preview|previewShared>    -> env only (destroys)
 //
 // Strings may reference repository variables and run context:
 //   ${vars.NAME}            value of the repository/organization variable
@@ -134,7 +135,15 @@ if (process.argv[1] && import.meta.filename === resolve(process.argv[1])) {
       const lines = multiline(name, value).join("\n");
       if (envFile) appendFileSync(envFile, `${lines}\n`);
     }
+  } else if (command === "env") {
+    // Destroys run the stack's dynamic providers too, so they need its env.
+    const secrets = JSON.parse(process.env.SECRETS_JSON || "{}");
+    const envFile = process.env.GITHUB_ENV;
+    for (const [name, value] of pulumiEnv(config, kind, secrets)) {
+      const lines = multiline(name, value).join("\n");
+      if (envFile) appendFileSync(envFile, `${lines}\n`);
+    }
   } else {
-    throw new Error("Usage: config.mjs values <kind> | pulumi <stackKind>");
+    throw new Error("Usage: config.mjs values <kind> | pulumi <stackKind> | env <stackKind>");
   }
 }
