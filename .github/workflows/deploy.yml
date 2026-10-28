@@ -418,6 +418,7 @@ jobs:
           BOX: ${{ steps.cfg.outputs.box }}
           SECRET_PREFIX: ${{ steps.cfg.outputs.runtimeSecretPrefix }}
           CACHE_REPOSITORY: ${{ steps.cfg.outputs.buildCacheRepository }}
+          STATE_BUCKET: ${{ vars.PULUMI_STATE_BUCKET }}
         run: |
           set -eu
           ready=true
@@ -426,6 +427,9 @@ jobs:
           [ "$(aws secretsmanager list-secrets --filters "Key=name,Values=${SECRET_PREFIX}" --query 'length(SecretList)' --output text)" -gt 0 ] || ready=false
           if [ -n "$CACHE_REPOSITORY" ]; then
             aws ecr describe-repositories --repository-names "$CACHE_REPOSITORY" >/dev/null 2>&1 || ready=false
+          fi
+          if [ -n "$STATE_BUCKET" ]; then
+            [ "$(sh .majapi-ci/scripts/container/pulumi-state.sh outputs "$STATE_BUCKET" preview-shared)" = true ] || ready=false
           fi
           echo "provision=$([ "$ready" = true ] && echo false || echo true)" >> "$GITHUB_OUTPUT"
       - id: pulumi_cfg
