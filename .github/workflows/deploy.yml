@@ -420,6 +420,8 @@ jobs:
           SECRET_PREFIX: ${{ steps.cfg.outputs.runtimeSecretPrefix }}
           CACHE_REPOSITORY: ${{ steps.cfg.outputs.buildCacheRepository }}
           STATE_BUCKET: ${{ vars.PULUMI_STATE_BUCKET }}
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -eu
           ready=true
@@ -442,6 +444,18 @@ jobs:
               sleep 10
             done
             [ "$online" = true ] || { echo "Box $ID is not reachable through SSM ($PING); provisioning."; ready=false; }
+          fi
+          # An existing stack is never re-applied otherwise, so infrastructure a
+          # pull request changes would not reach its preview.
+          INFRA_DIR="$(node -p 'require("./.majapi/ci.json").container.pulumi.workDir')"
+          INFRA_HASH="$(git rev-parse "HEAD:$INFRA_DIR")"
+          MARKER="s3://$STATE_BUCKET/.majapi/preview-shared-infra-hash"
+          echo "infra_hash=$INFRA_HASH" >> "$GITHUB_OUTPUT"
+          if [ "$ready" = true ] && [ -n "$STATE_BUCKET" ] \
+            && gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files" --jq '.[].filename' | grep -q "^$INFRA_DIR/" \
+            && [ "$(aws s3 cp --quiet "$MARKER" - 2>/dev/null || true)" != "$INFRA_HASH" ]; then
+            echo "This pull request changes $INFRA_DIR; applying it to preview-shared."
+            ready=false
           fi
           echo "provision=$([ "$ready" = true ] && echo false || echo true)" >> "$GITHUB_OUTPUT"
       - id: pulumi_cfg
@@ -481,6 +495,8 @@ jobs:
           PULUMI_CONFIG_PASSPHRASE: ${{ secrets.PULUMI_CONFIG_PASSPHRASE }}
       - if: steps.shared.outputs.provision == 'true'
         run: sh .majapi-ci/scripts/container/box.sh start "${{ steps.cfg.outputs.box }}"
+      - if: steps.shared.outputs.provision == 'true' && vars.PULUMI_STATE_BUCKET != ''
+        run: printf '%s' "${{ steps.shared.outputs.infra_hash }}" | aws s3 cp --quiet - "s3://${{ vars.PULUMI_STATE_BUCKET }}/.majapi/preview-shared-infra-hash"
 
   container_preview_fast:
     needs: [detect, container_classify, container_preview_shared]
