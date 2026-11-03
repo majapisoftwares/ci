@@ -3,7 +3,8 @@
 # its production dependencies, hands the release to Cloud with this run's
 # GitHub OIDC token, and waits until the host's agent reports it live.
 # Prints the app URL on the last line. Inputs (env):
-#   APP CLOUD_URL ARTIFACT_BUCKET DOMAIN [RELEASE_TIMEOUT_SECONDS]
+#   APP CLOUD_URL ARTIFACT_BUCKET DOMAIN [PREVIEW_PR] [RELEASE_TIMEOUT_SECONDS]
+# With PREVIEW_PR, releases that pull request's preview and prints its URL.
 # Needs `permissions: id-token: write` and AWS credentials for the bucket.
 set -eu
 
@@ -40,7 +41,9 @@ log "uploading release ($(du -h "${TMP}/release.tgz" | cut -f1))"
 aws s3 cp "${TMP}/release.tgz" "s3://${ARTIFACT_BUCKET}/${ARTIFACT_KEY}" --only-show-errors
 
 BODY="$(printf '{"sha":"%s","artifactKey":"%s","dependenciesKey":"%s","lockHash":"%s"}' "$GITHUB_SHA" "$ARTIFACT_KEY" "$DEPENDENCIES_KEY" "$LOCK_HASH")"
-RESPONSE="$(curl -sS -X POST "${CLOUD_URL}/api/v1/apps/${APP}/releases" -H "Authorization: Bearer $(oidc)" -H "Content-Type: application/json" -d "$BODY" -w '\n%{http_code}')"
+RELEASES_PATH="/api/v1/apps/${APP}/releases"
+[ -z "${PREVIEW_PR:-}" ] || RELEASES_PATH="/api/v1/apps/${APP}/previews/${PREVIEW_PR}/releases"
+RESPONSE="$(curl -sS -X POST "${CLOUD_URL}${RELEASES_PATH}" -H "Authorization: Bearer $(oidc)" -H "Content-Type: application/json" -d "$BODY" -w '\n%{http_code}')"
 CODE="$(printf '%s' "$RESPONSE" | tail -n 1)"
 RESPONSE="$(printf '%s' "$RESPONSE" | sed '$d')"
 if [ "$CODE" != 202 ]; then
@@ -48,6 +51,8 @@ if [ "$CODE" != 202 ]; then
   exit 1
 fi
 RELEASE="$(printf '%s' "$RESPONSE" | json id)"
+URL="$(printf '%s' "$RESPONSE" | json url)"
+[ -n "$URL" ] || URL="https://${DOMAIN}"
 log "release ${RELEASE} queued on Cloud"
 
 DEADLINE=$(( $(date +%s) + TIMEOUT ))
@@ -67,4 +72,4 @@ case "$STATUS" in
   failed) echo "The host could not install the release." >&2; exit 1 ;;
   *) echo "The release was still ${STATUS} after ${TIMEOUT}s." >&2; exit 1 ;;
 esac
-printf 'https://%s\n' "$DOMAIN"
+printf '%s\n' "$URL"
