@@ -1025,7 +1025,8 @@ jobs:
           NODE_OPTIONS: --max-old-space-size=4096
       - uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN || vars.AWS_DEPLOY_ROLE_ARN }}
+          # Trusted for pull requests; may write only the preview prefixes of the artifact bucket.
+          role-to-assume: ${{ vars.PREVIEW_DEPLOY_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION || 'sa-east-1' }}
       - id: release
         env:

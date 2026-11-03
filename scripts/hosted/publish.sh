@@ -22,6 +22,11 @@ oidc() { curl -fsS -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" 
 LOCK_HASH="$(sha256sum package-lock.json | cut -c1-16)"
 DEPENDENCIES_KEY="compiled-dependencies/${LOCK_HASH}.tgz"
 ARTIFACT_KEY="compiled-releases/hosted/${APP}/${GITHUB_SHA}.tgz"
+# Previews upload under their own prefixes, so a pull request never writes what production installs.
+if [ -n "${PREVIEW_PR:-}" ]; then
+  DEPENDENCIES_KEY="compiled-dependencies/previews/${LOCK_HASH}.tgz"
+  ARTIFACT_KEY="compiled-releases/hosted-previews/${APP}/${GITHUB_SHA}.tgz"
+fi
 
 # Production dependencies are shared by every release with the same lockfile.
 if ! aws s3api head-object --bucket "$ARTIFACT_BUCKET" --key "$DEPENDENCIES_KEY" >/dev/null 2>&1; then
