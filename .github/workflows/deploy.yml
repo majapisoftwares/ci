@@ -988,3 +988,88 @@ jobs:
           echo "url=$url" >> "$GITHUB_OUTPUT"
       - name: Verify production
         run: curl -fsSL --retry 18 --retry-all-errors --retry-delay 5 --max-time 15 "${{ steps.release.outputs.url }}${{ steps.cfg.outputs.healthPath }}" >/dev/null
+
+  # A pull request's preview of a hosted app: Cloud runs it next to the app, with
+  # the app's env, at pr-<n>-<app>.preview.majapi.com, and removes it when the PR closes.
+  hosted_preview:
+    needs: detect
+    if: needs.detect.outputs.hosted == 'true' && needs.detect.outputs.preview == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: majapisoftwares/ci
+          ref: ${{ inputs.ci_ref }}
+          path: .majapi-ci
+      - id: cfg
+        run: node .majapi-ci/scripts/hosted/config.mjs >> "$GITHUB_OUTPUT"
+      - run: node .majapi-ci/scripts/preview-comment.mjs building ""
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+      - run: ${{ steps.cfg.outputs.buildCommand }}
+        env:
+          NEXT_DEPLOYMENT_ID: ${{ github.sha }}
+          NODE_OPTIONS: --max-old-space-size=4096
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN || vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'sa-east-1' }}
+      - id: release
+        env:
+          APP: ${{ steps.cfg.outputs.app }}
+          CLOUD_URL: ${{ steps.cfg.outputs.cloudUrl }}
+          DOMAIN: ${{ steps.cfg.outputs.domain }}
+          PREVIEW_PR: ${{ github.event.pull_request.number }}
+          ARTIFACT_BUCKET: ${{ vars.HOSTED_ARTIFACT_BUCKET || vars.PULUMI_STATE_BUCKET }}
+        run: |
+          set -euo pipefail
+          url=$(sh .majapi-ci/scripts/hosted/publish.sh | tail -n 1)
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+      - name: Verify preview
+        run: curl -fsSL --retry 24 --retry-all-errors --retry-delay 5 --max-time 15 "${{ steps.release.outputs.url }}${{ steps.cfg.outputs.healthPath }}" >/dev/null
+      - run: node .majapi-ci/scripts/preview-comment.mjs ready "${{ steps.release.outputs.url }}"
+      - if: failure()
+        run: node .majapi-ci/scripts/preview-comment.mjs failed ""
+
+  hosted_preview_cleanup:
+    needs: detect
+    if: needs.detect.outputs.hosted == 'true' && needs.detect.outputs.cleanup == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: majapisoftwares/ci
+          ref: ${{ inputs.ci_ref }}
+          path: .majapi-ci
+      - id: cfg
+        run: node .majapi-ci/scripts/hosted/config.mjs >> "$GITHUB_OUTPUT"
+      - name: Remove the preview
+        env:
+          APP: ${{ steps.cfg.outputs.app }}
+          CLOUD_URL: ${{ steps.cfg.outputs.cloudUrl }}
+        run: |
+          set -eu
+          token=$(curl -fsS -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${CLOUD_URL%/}" | node -p 'JSON.parse(require("fs").readFileSync(0,"utf8")).value')
+          curl -fsS -X POST "${CLOUD_URL%/}/api/v1/apps/${APP}/previews/${PR_NUMBER}/delete" -H "Authorization: Bearer ${token}" >/dev/null
+      - run: node .majapi-ci/scripts/preview-comment.mjs removed ""
