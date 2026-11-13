@@ -45,6 +45,10 @@ jobs:
 
 Fixes within `v2` reach every repository automatically. A breaking change ships as `v3`, and repositories move to it with a one-line change.
 
+## Build cache
+
+Next.js builds here restore Turbopack's `.next/cache` from the app's own CI, so deploys and previews build warm. The app's CI saves it on `main` with the key `next-build-<hash of package-lock.json>-<sha>`, and pull requests restore that one. A miss only means a cold build. The app pattern (checks in parallel jobs of `npm run verify`, and the caches) is in [majapisoftwares/ui](https://github.com/majapisoftwares/ui/blob/main/docs/STANDARDS.md).
+
 ## Override
 
 When detection is wrong, add `.majapi/ci.json`:

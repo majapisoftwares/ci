@@ -22,6 +22,12 @@ on:
       HOSTED_ENV:
         description: "Hosted apps only. The runtime env, for callers outside the organization (secrets: inherit passes nothing there); otherwise the secret named by hosted.envSecret is used."
         required: false
+      AWS_ROLE_ARN:
+        description: The deploy role, when the repository has its own (else vars.AWS_DEPLOY_ROLE_ARN).
+        required: false
+      PULUMI_CONFIG_PASSPHRASE:
+        description: Container repos with Pulumi stacks only.
+        required: false
     outputs:
       type:
         description: Detected app type (static, container or none).
@@ -112,6 +118,13 @@ jobs:
           node-version: "22"
           cache: npm
       - run: npm ci
+      # Next.js builds start warm: the app's CI saves Turbopack's .next/cache on main
+      # (key next-build-<lockfile hash>-<sha>); a miss only means a cold build.
+      - uses: actions/cache/restore@v4
+        with:
+          path: .next/cache
+          key: next-build-${{ hashFiles('package-lock.json') }}-${{ github.sha }}
+          restore-keys: next-build-${{ hashFiles('package-lock.json') }}-
       - run: npm run build
       - uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -168,6 +181,13 @@ jobs:
           node-version: "22"
           cache: npm
       - run: npm ci
+      # Next.js builds start warm: the app's CI saves Turbopack's .next/cache on main
+      # (key next-build-<lockfile hash>-<sha>); a miss only means a cold build.
+      - uses: actions/cache/restore@v4
+        with:
+          path: .next/cache
+          key: next-build-${{ hashFiles('package-lock.json') }}-${{ github.sha }}
+          restore-keys: next-build-${{ hashFiles('package-lock.json') }}-
       - run: npm run build
       - if: env.ROLE_ARN != ''
         uses: aws-actions/configure-aws-credentials@v4
@@ -211,6 +231,13 @@ jobs:
           node-version: "22"
           cache: npm
       - run: npm ci
+      # Next.js builds start warm: the app's CI saves Turbopack's .next/cache on main
+      # (key next-build-<lockfile hash>-<sha>); a miss only means a cold build.
+      - uses: actions/cache/restore@v4
+        with:
+          path: .next/cache
+          key: next-build-${{ hashFiles('package-lock.json') }}-${{ github.sha }}
+          restore-keys: next-build-${{ hashFiles('package-lock.json') }}-
       - run: npm run build
       - run: echo 'Built only; add a container block to .majapi/ci.json to deploy.' >> "$GITHUB_STEP_SUMMARY"
 
@@ -354,6 +381,13 @@ jobs:
       - run: npm ci --no-audit --no-fund
         env:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+      # Next.js builds start warm: the app's CI saves Turbopack's .next/cache on main
+      # (key next-build-<lockfile hash>-<sha>); a miss only means a cold build.
+      - uses: actions/cache/restore@v4
+        with:
+          path: .next/cache
+          key: next-build-${{ hashFiles('package-lock.json') }}-${{ github.sha }}
+          restore-keys: next-build-${{ hashFiles('package-lock.json') }}-
       - run: ${{ steps.cfg.outputs.buildCommand || 'npm run build' }}
         env:
           NEXT_DEPLOYMENT_ID: ${{ github.sha }}
@@ -438,7 +472,7 @@ jobs:
           # destroy) can't take deploys; `pulumi up` restores what's missing.
           if [ "$ready" = true ]; then
             online=false
-            for attempt in $(seq 1 18); do
+            for _ in $(seq 1 18); do
               PING="$(aws ssm describe-instance-information --filters "Key=InstanceIds,Values=$ID" --query 'InstanceInformationList[0].PingStatus' --output text)"
               if [ "$PING" = Online ]; then online=true; break; fi
               sleep 10
@@ -576,6 +610,13 @@ jobs:
       - run: npm ci --no-audit --no-fund
         env:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+      # Next.js builds start warm: the app's CI saves Turbopack's .next/cache on main
+      # (key next-build-<lockfile hash>-<sha>); a miss only means a cold build.
+      - uses: actions/cache/restore@v4
+        with:
+          path: .next/cache
+          key: next-build-${{ hashFiles('package-lock.json') }}-${{ github.sha }}
+          restore-keys: next-build-${{ hashFiles('package-lock.json') }}-
       - run: ${{ steps.cfg.outputs.buildCommand || 'npm run build' }}
         env:
           NEXT_DEPLOYMENT_ID: ${{ github.sha }}
@@ -958,6 +999,13 @@ jobs:
       - run: npm ci --no-audit --no-fund
         env:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+      # Next.js builds start warm: the app's CI saves Turbopack's .next/cache on main
+      # (key next-build-<lockfile hash>-<sha>); a miss only means a cold build.
+      - uses: actions/cache/restore@v4
+        with:
+          path: .next/cache
+          key: next-build-${{ hashFiles('package-lock.json') }}-${{ github.sha }}
+          restore-keys: next-build-${{ hashFiles('package-lock.json') }}-
       - run: ${{ steps.cfg.outputs.buildCommand }}
         env:
           NEXT_DEPLOYMENT_ID: ${{ github.sha }}
@@ -1019,6 +1067,13 @@ jobs:
       - run: npm ci --no-audit --no-fund
         env:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+      # Next.js builds start warm: the app's CI saves Turbopack's .next/cache on main
+      # (key next-build-<lockfile hash>-<sha>); a miss only means a cold build.
+      - uses: actions/cache/restore@v4
+        with:
+          path: .next/cache
+          key: next-build-${{ hashFiles('package-lock.json') }}-${{ github.sha }}
+          restore-keys: next-build-${{ hashFiles('package-lock.json') }}-
       - run: ${{ steps.cfg.outputs.buildCommand }}
         env:
           NEXT_DEPLOYMENT_ID: ${{ github.sha }}
