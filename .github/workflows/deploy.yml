@@ -112,6 +112,13 @@ jobs:
           node-version: "22"
           cache: npm
       - run: npm ci
+      # Next.js builds start warm: the app's CI saves Turbopack's .next/cache on main
+      # (key next-build-<lockfile hash>-<sha>); a miss only means a cold build.
+      - uses: actions/cache/restore@v4
+        with:
+          path: .next/cache
+          key: next-build-${{ hashFiles('package-lock.json') }}-${{ github.sha }}
+          restore-keys: next-build-${{ hashFiles('package-lock.json') }}-
       - run: npm run build
       - uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -168,6 +175,13 @@ jobs:
           node-version: "22"
           cache: npm
       - run: npm ci
+      # Next.js builds start warm: the app's CI saves Turbopack's .next/cache on main
+      # (key next-build-<lockfile hash>-<sha>); a miss only means a cold build.
+      - uses: actions/cache/restore@v4
+        with:
+          path: .next/cache
+          key: next-build-${{ hashFiles('package-lock.json') }}-${{ github.sha }}
+          restore-keys: next-build-${{ hashFiles('package-lock.json') }}-
       - run: npm run build
       - if: env.ROLE_ARN != ''
         uses: aws-actions/configure-aws-credentials@v4
@@ -211,6 +225,13 @@ jobs:
           node-version: "22"
           cache: npm
       - run: npm ci
+      # Next.js builds start warm: the app's CI saves Turbopack's .next/cache on main
+      # (key next-build-<lockfile hash>-<sha>); a miss only means a cold build.
+      - uses: actions/cache/restore@v4
+        with:
+          path: .next/cache
+          key: next-build-${{ hashFiles('package-lock.json') }}-${{ github.sha }}
+          restore-keys: next-build-${{ hashFiles('package-lock.json') }}-
       - run: npm run build
       - run: echo 'Built only; add a container block to .majapi/ci.json to deploy.' >> "$GITHUB_STEP_SUMMARY"
 
@@ -354,6 +375,13 @@ jobs:
       - run: npm ci --no-audit --no-fund
         env:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+      # Next.js builds start warm: the app's CI saves Turbopack's .next/cache on main
+      # (key next-build-<lockfile hash>-<sha>); a miss only means a cold build.
+      - uses: actions/cache/restore@v4
+        with:
+          path: .next/cache
+          key: next-build-${{ hashFiles('package-lock.json') }}-${{ github.sha }}
+          restore-keys: next-build-${{ hashFiles('package-lock.json') }}-
       - run: ${{ steps.cfg.outputs.buildCommand || 'npm run build' }}
         env:
           NEXT_DEPLOYMENT_ID: ${{ github.sha }}
@@ -576,6 +604,13 @@ jobs:
       - run: npm ci --no-audit --no-fund
         env:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+      # Next.js builds start warm: the app's CI saves Turbopack's .next/cache on main
+      # (key next-build-<lockfile hash>-<sha>); a miss only means a cold build.
+      - uses: actions/cache/restore@v4
+        with:
+          path: .next/cache
+          key: next-build-${{ hashFiles('package-lock.json') }}-${{ github.sha }}
+          restore-keys: next-build-${{ hashFiles('package-lock.json') }}-
       - run: ${{ steps.cfg.outputs.buildCommand || 'npm run build' }}
         env:
           NEXT_DEPLOYMENT_ID: ${{ github.sha }}
@@ -958,6 +993,13 @@ jobs:
       - run: npm ci --no-audit --no-fund
         env:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+      # Next.js builds start warm: the app's CI saves Turbopack's .next/cache on main
+      # (key next-build-<lockfile hash>-<sha>); a miss only means a cold build.
+      - uses: actions/cache/restore@v4
+        with:
+          path: .next/cache
+          key: next-build-${{ hashFiles('package-lock.json') }}-${{ github.sha }}
+          restore-keys: next-build-${{ hashFiles('package-lock.json') }}-
       - run: ${{ steps.cfg.outputs.buildCommand }}
         env:
           NEXT_DEPLOYMENT_ID: ${{ github.sha }}
@@ -1019,6 +1061,13 @@ jobs:
       - run: npm ci --no-audit --no-fund
         env:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+      # Next.js builds start warm: the app's CI saves Turbopack's .next/cache on main
+      # (key next-build-<lockfile hash>-<sha>); a miss only means a cold build.
+      - uses: actions/cache/restore@v4
+        with:
+          path: .next/cache
+          key: next-build-${{ hashFiles('package-lock.json') }}-${{ github.sha }}
+          restore-keys: next-build-${{ hashFiles('package-lock.json') }}-
       - run: ${{ steps.cfg.outputs.buildCommand }}
         env:
           NEXT_DEPLOYMENT_ID: ${{ github.sha }}
